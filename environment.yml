@@ -1,0 +1,14 @@
+name: manabot
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pytorch::pytorch
+  - numpy
+  - pandas
+  - wandb
+  - pytest
+  - pip
+  - black
