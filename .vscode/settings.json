@@ -1,3 +1,9 @@
 {
-    "python.defaultInterpreterPath": "/Users/jack/micromamba/envs/manabot/bin/python"
+    "python.defaultInterpreterPath": "/Users/jack/micromamba/envs/manabot/bin/python",
+    "editor.inlineSuggest.enabled": true,
+    "editor.tabCompletion": "on",
+    "editor.stickyTabStops": true,
+    "files.autoSave": "afterDelay",
+    "python.analysis.typeCheckingMode": "standard",
+    "explorer.excludeGitIgnore": true,
 }

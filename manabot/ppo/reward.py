@@ -79,3 +79,64 @@ class BasicRewardPolicy(RewardPolicy):
             reward += self.progression_reward
             
         return reward
+    
+
+
+
+    def to_tensors(self, card_embeddings: CardEmbeddings, num_permanents: int, num_actions: int, device: str = 'cuda') -> Dict[str, Tensor]:
+        """Convert to tensor format with card embeddings and fixed sizes."""
+        # Pad battlefield to fixed size
+        padded_battlefield = self.battlefield + [ Permanent(card_id=0, owner_id=0, controller_id=0) for _ in range(num_permanents - len(self.battlefield)) ]
+        
+        permanent_tensor = torch.tensor([[
+            # Embedding Key
+            p.card_id,
+            # Retained features
+            p.owner_id,
+            p.controller_id,
+            int(p.tapped),
+            int(p.attacking),
+            int(p.blocking),
+            int(p.summoning_sick),
+            p.power,
+            p.toughness,
+            p.damage
+        ] for p in padded_battlefield[:num_permanents]], device=device)
+
+        # Embed card_ids for permanents
+        permanent_tensor = card_embeddings.embed_field(permanent_tensor, field_idx=0)
+    
+        # Pad actions to fixed size
+        padded_actions = self.action_options + [
+            ActionOption(source_id=0, target_id=0, valid=False)  # Pad with invalid action
+            for _ in range(num_actions - len(self.action_options))
+        ]
+        action_tensor = torch.tensor([[
+            a.source_id,
+            a.target_id,
+            int(a.valid)
+        ] for a in padded_actions[:num_actions]], device=device)
+        
+        # First embed the source
+        action_tensor = card_embeddings.embed_field(action_tensor, field_idx=0)  
+        # Then embed target, which is now at index embedding_dim
+        action_tensor = card_embeddings.embed_field(action_tensor, field_idx=card_embeddings.embedding_dim)
+            
+        # Core game state features
+        game_tensor = torch.tensor([
+            self.active_player,
+            self.turn_number,
+            int(self.step),
+            *self.life_totals,
+            int(self.action_type),
+            self.lands_played_this_turn,
+            int(self.game_over),
+            int(self.won)
+        ], device=device)
+
+        return {
+            'permanents': permanent_tensor,  # Shape: (num_permanents, embedding_dim + 9)
+            'actions': action_tensor,        # Shape: (num_actions, 2*embedding_dim + 1)
+            'game': game_tensor             # Shape: (10,)
+        }
+

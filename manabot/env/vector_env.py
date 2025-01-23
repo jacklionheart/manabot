@@ -1,12 +1,10 @@
 from typing import List, Tuple, Dict
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
-from manabot.env import Observation, ObservationSpace
-import threading
-from torch import Tensor
-import torch
-
+from manabot.env.data import Observation
 from manabot.env import Env
+
+import threading
 
 
 class VectorEnv():
@@ -27,11 +25,6 @@ class VectorEnv():
     def device(self) -> str:
         """Device to use for tensor operations"""
         return self.envs[0].device
-    
-    @property
-    def observation_space(self) -> ObservationSpace:
-        """Observation space of the environment"""
-        return self.envs[0].observation_space
     
     def start(self) -> List[Observation]:
         """Start all environments"""

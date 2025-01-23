@@ -4,7 +4,7 @@ from torch import Tensor
 import numpy as np
 from sympy import O
 
-from manabot.env.data import Observation, ObservationSpace
+from manabot.env.data import Observation
 
 class Env(Protocol):
     """Protocol defining required game environment interface"""
@@ -29,9 +29,5 @@ class Env(Protocol):
 
     def close(self): ...
     
-
-    @property
-    def observation_space(self) -> ObservationSpace: ...
-
     @property
     def device(self) -> str: ...
