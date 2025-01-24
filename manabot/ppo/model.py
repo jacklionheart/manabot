@@ -8,7 +8,7 @@ import torch
 import torch.nn
 
 from manabot.env import VectorEnv
-from manabot.env.data import Observation
+from manabot.data import Observation
 from manabot.ppo import Hypers
 from manabot.ppo.experiment import Experiment
 from manabot.env import ObservationSpace

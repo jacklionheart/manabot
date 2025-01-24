@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Dict, Optional
 
-from manabot.env.data import Observation
+from manabot.data.data import Observation
 
 class RewardPolicy(ABC):
     """Abstract base class for reward computation strategies."""

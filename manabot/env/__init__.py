@@ -1,5 +1,5 @@
 from .env import Env
 from .vector_env import VectorEnv
-from .data import Observation
+from .config import PlayerConfig
 
-__all__ = ['Env', 'VectorEnv', 'Observation']
+__all__ = ['Env', 'VectorEnv', 'PlayerConfig']

@@ -1,5 +1,7 @@
 {
     "python.defaultInterpreterPath": "/Users/jack/micromamba/envs/manabot/bin/python",
+    "python.analysis.extraPaths": ["/Users/jack/micromamba/envs/manabot/lib/python3.12/site-packages"],
+    "python.autoComplete.extraPaths": ["/Users/jack/micromamba/envs/manabot/lib/python3.12/site-packages"],
     "editor.inlineSuggest.enabled": true,
     "editor.tabCompletion": "on",
     "editor.stickyTabStops": true,
