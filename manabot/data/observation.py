@@ -1,27 +1,21 @@
-# observation.py
-# Defines data structures that are returned as part of the observations from the environment.
-#
-# All of these classes mirror the C++ structs in managym.
-# We only implement a one-way "from C++" conversion for bridging the environment states.
+# observation.py 
+# schema for the game state data returned by managym.
+
+"""
+EDITING INSTRUCTIONS:    
+Each data structure mirrors exactly a corresponding managym C++ structure; existing tests should mostly ensure they keep in sync.
+Prioritize brevity and transparency when editing; 
+ensure it remains an easy reference guide to raw data structures. 
+Keep comments minimal and organizational.
+"""
 
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Dict, List
 
-import managym
-
-
-# ---------------------------------------------------------------------
-# Python Enums referencing C++ enums
-# ---------------------------------------------------------------------
-class ZoneEnum(IntEnum):
-    LIBRARY = 0
-    HAND = 1
-    BATTLEFIELD = 2
-    GRAVEYARD = 3
-    STACK = 4
-    EXILE = 5
-    COMMAND = 6
+# -----------------------------------------------------------------------------
+# Enums
+# -----------------------------------------------------------------------------
 
 class PhaseEnum(IntEnum):
     BEGINNING = 0
@@ -46,7 +40,7 @@ class StepEnum(IntEnum):
 
 class ActionEnum(IntEnum):
     PRIORITY_PLAY_LAND = 0
-    PRIORITY_CAST_SPELL = 1  
+    PRIORITY_CAST_SPELL = 1
     PRIORITY_PASS_PRIORITY = 2
     DECLARE_ATTACKER = 3
     DECLARE_BLOCKER = 4
@@ -57,9 +51,19 @@ class ActionSpaceEnum(IntEnum):
     DECLARE_ATTACKER = 2
     DECLARE_BLOCKER = 3
 
-# ---------------------------------------------------------------------
-# Data Classes
-# ---------------------------------------------------------------------
+class ZoneEnum(IntEnum):
+    LIBRARY = 0
+    HAND = 1
+    BATTLEFIELD = 2
+    GRAVEYARD = 3
+    STACK = 4
+    EXILE = 5
+    COMMAND = 6
+
+# -----------------------------------------------------------------------------
+#  Data structures
+# -----------------------------------------------------------------------------
+
 @dataclass
 class Turn:
     turn_number: int
@@ -94,7 +98,7 @@ class CardTypes:
 
 @dataclass
 class ManaCost:
-    cost: List[int]   # e.g. [W, U, B, R, G, C]
+    cost: List[int]
     mana_value: int
 
 @dataclass
@@ -131,11 +135,18 @@ class ActionSpace:
 
 @dataclass
 class Observation:
-    """A Pythonic snapshot of the entire game state."""
     game_over: bool = False
-    won: bool = False 
-    turn: Turn = field(default_factory=lambda: Turn(0, PhaseEnum.BEGINNING, StepEnum.BEGINNING_UNTAP, -1, -1))
-    action_space: ActionSpace = field(default_factory=lambda: ActionSpace(ActionSpaceEnum.GAME_OVER, [], []))
+    won: bool = False
+    turn: Turn = field(default_factory=lambda: Turn(
+        turn_number=0,
+        phase=PhaseEnum.BEGINNING,
+        step=StepEnum.BEGINNING_UNTAP,
+        active_player_id=-1,
+        agent_player_id=-1
+    ))
+    action_space: ActionSpace = field(default_factory=lambda: ActionSpace(
+        action_space_type=ActionSpaceEnum.GAME_OVER, actions=[], focus=[]
+    ))
     players: Dict[int, Player] = field(default_factory=dict)
     cards: Dict[int, Card] = field(default_factory=dict)
     permanents: Dict[int, Permanent] = field(default_factory=dict)
@@ -145,33 +156,28 @@ class Observation:
         if cxx_obs is not None:
             self.game_over = cxx_obs.game_over
             self.won = cxx_obs.won
-            
-            # Convert Turn
             self.turn = Turn(
                 turn_number=cxx_obs.turn.turn_number,
-                phase=PhaseEnum(int(cxx_obs.turn.phase) & 0xFF),  # Mask to get base enum value
+                phase=PhaseEnum(int(cxx_obs.turn.phase) & 0xFF),
                 step=StepEnum(int(cxx_obs.turn.step) & 0xFF),
                 active_player_id=cxx_obs.turn.active_player_id,
                 agent_player_id=cxx_obs.turn.agent_player_id
             )
-
-            # Convert ActionSpace
-            actions = [
+            a_actions = [
                 Action(
-                    action_type=ActionEnum(int(act_cpp.action_type) & 0xFF),
-                    focus=list(act_cpp.focus)
+                    action_type=ActionEnum(int(a.action_type) & 0xFF),
+                    focus=list(a.focus)
                 )
-                for act_cpp in cxx_obs.action_space.actions
+                for a in cxx_obs.action_space.actions
             ]
             self.action_space = ActionSpace(
                 action_space_type=ActionSpaceEnum(int(cxx_obs.action_space.action_space_type) & 0xFF),
-                actions=actions,
+                actions=a_actions,
                 focus=list(cxx_obs.action_space.focus)
             )
-
-            # Convert Players
-            self.players = {
-                pid: Player(
+            self.players = {}
+            for pid, p_cpp in cxx_obs.players.items():
+                pdat = Player(
                     id=p_cpp.id,
                     player_index=p_cpp.player_index,
                     is_agent=p_cpp.is_agent,
@@ -179,13 +185,11 @@ class Observation:
                     life=p_cpp.life,
                     zone_counts=list(p_cpp.zone_counts)
                 )
-                for pid, p_cpp in cxx_obs.players.items()
-            }
+                self.players[pid] = pdat
 
-            # Convert Cards  
             self.cards = {}
             for cid, c_cpp in cxx_obs.cards.items():
-                card_types = CardTypes(
+                ctype = CardTypes(
                     is_castable=c_cpp.card_types.is_castable,
                     is_permanent=c_cpp.card_types.is_permanent,
                     is_non_land_permanent=c_cpp.card_types.is_non_land_permanent,
@@ -197,9 +201,9 @@ class Observation:
                     is_enchantment=c_cpp.card_types.is_enchantment,
                     is_artifact=c_cpp.card_types.is_artifact,
                     is_kindred=c_cpp.card_types.is_kindred,
-                    is_battle=c_cpp.card_types.is_battle,
+                    is_battle=c_cpp.card_types.is_battle
                 )
-                mana_cost = ManaCost(
+                cmana = ManaCost(
                     cost=list(c_cpp.mana_cost.cost),
                     mana_value=c_cpp.mana_cost.mana_value
                 )
@@ -210,35 +214,31 @@ class Observation:
                     registry_key=c_cpp.registry_key,
                     power=c_cpp.power,
                     toughness=c_cpp.toughness,
-                    card_types=card_types,
-                    mana_cost=mana_cost
+                    card_types=ctype,
+                    mana_cost=cmana
                 )
 
-            # Convert Permanents
-            self.permanents = {
-                pid: Permanent(
-                    id=p_cpp.id,
-                    controller_id=p_cpp.controller_id,
-                    tapped=p_cpp.tapped,
-                    damage=p_cpp.damage,
-                    is_creature=p_cpp.is_creature,
-                    is_land=p_cpp.is_land,
-                    is_summoning_sick=p_cpp.is_summoning_sick
+            self.permanents = {}
+            for pid, pp in cxx_obs.permanents.items():
+                self.permanents[pid] = Permanent(
+                    id=pp.id,
+                    controller_id=pp.controller_id,
+                    tapped=pp.tapped,
+                    damage=pp.damage,
+                    is_creature=pp.is_creature,
+                    is_land=pp.is_land,
+                    is_summoning_sick=pp.is_summoning_sick
                 )
-                for pid, p_cpp in cxx_obs.permanents.items()
-            }
 
     def validate(self) -> bool:
-        # Basic consistency checks
-        if self.turn.turn_number < 0:
-            return False
-        for pid, player_data in self.players.items():
-            if player_data.id != pid:
+        # Minimal checks
+        for pid, pdat in self.players.items():
+            if pdat.id != pid:
                 return False
-        for cid, card_data in self.cards.items():
-            if card_data.id != cid:
+        for cid, cdat in self.cards.items():
+            if cdat.id != cid:
                 return False
-        for pid, perm_data in self.permanents.items():
-            if perm_data.id != pid:
+        for pid, pdat in self.permanents.items():
+            if pdat.id != pid:
                 return False
         return True

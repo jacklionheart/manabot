@@ -1,3 +1,12 @@
-from .observation import Observation, Turn, Player, Card, Permanent, Action, ActionSpace, ManaCost, CardTypes, ZoneEnum, PhaseEnum, StepEnum, ActionEnum, ActionSpaceEnum
+from .observation import PhaseEnum, StepEnum, ActionEnum, ActionSpaceEnum, ZoneEnum
+from .observation import Turn, Player, Card, Permanent, Action, ActionSpace, ManaCost, CardTypes
+from .observation import Observation
 
-__all__ = ['Observation', 'Turn', 'Player', 'Card', 'Permanent', 'Action', 'ActionSpace', 'ManaCost', 'CardTypes', 'ZoneEnum', 'PhaseEnum', 'StepEnum', 'ActionEnum', 'ActionSpaceEnum']
+from .representation import InputTensorSpace
+
+__all__ = [
+    'PhaseEnum', 'StepEnum', 'ActionEnum', 'ActionSpaceEnum', 'ZoneEnum',
+    'Turn', 'Player', 'Card', 'Permanent', 'Action', 'ActionSpace', 'ManaCost', 'CardTypes',
+    'Observation',
+    'InputTensorSpace'
+]

@@ -108,7 +108,7 @@ class BasicRewardPolicy(RewardPolicy):
     
         # Pad actions to fixed size
         padded_actions = self.action_options + [
-            ActionOption(source_id=0, target_id=0, valid=False)  # Pad with invalid action
+            Action(source_id=0, target_id=0, valid=False)  # Pad with invalid action
             for _ in range(num_actions - len(self.action_options))
         ]
         action_tensor = torch.tensor([[

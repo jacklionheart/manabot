@@ -11,7 +11,7 @@ from manabot.env import VectorEnv
 from manabot.data import Observation
 from manabot.ppo import Hypers
 from manabot.ppo.experiment import Experiment
-from manabot.env import ObservationSpace
+from manabot.data import ObservationSpace
 
 
 

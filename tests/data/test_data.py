@@ -5,13 +5,11 @@ import managym
 
 # Our Python-side enumerations/data classes
 from manabot.data import (
-    # Python Enums
     ZoneEnum,
     PhaseEnum,
     StepEnum,
     ActionEnum,
     ActionSpaceEnum,
-    # Python Data Classes
     Turn,
     Player,
     CardTypes,
@@ -23,9 +21,9 @@ from manabot.data import (
     Observation,
 )
 
-###############################################################################
+# -----------------------------------------------------------------------------
 # 1) Enum Tests
-###############################################################################
+# -----------------------------------------------------------------------------
 class TestEnumParity(unittest.TestCase):
     """
     Compare Python-side enum values (manabot.data.*Enum) with the pybind C++ side (managym.*Enum).
@@ -78,12 +76,12 @@ class TestEnumParity(unittest.TestCase):
         self.assertEqual(int(managym.ActionSpaceEnum.DECLARE_BLOCKER), ActionSpaceEnum.DECLARE_BLOCKER)
 
 
-###############################################################################
+# -----------------------------------------------------------------------------
 # 2) Structural Field Tests
-###############################################################################
+# -----------------------------------------------------------------------------
 # We define a map from "C++ data struct name" to "(Python class, fields we expect)".
 # Then we confirm each field is present in the pybind class as well.
-###############################################################################
+# -----------------------------------------------------------------------------
 STRUCT_FIELD_MAP = {
     # managym.Player -> manabot.data.Player
     "Player": (
@@ -212,12 +210,12 @@ class TestStructFields(unittest.TestCase):
                     )
 
 
-###############################################################################
+# -----------------------------------------------------------------------------
 # 3) Round-Trip / Observation Tests
-###############################################################################
+# -----------------------------------------------------------------------------
 # We test that we can construct a managym.Observation in various ways and
 # that the Python "Observation" dataclass can parse it consistently.
-###############################################################################
+# -----------------------------------------------------------------------------
 class TestObservationRoundTrip(unittest.TestCase):
     def test_empty_observation(self):
         """

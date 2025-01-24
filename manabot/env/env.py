@@ -29,7 +29,3 @@ class Env:
         py_obs = Observation(cpp_obs)
         return py_obs, reward, terminated, truncated, info
 
-    def close(self):
-        # If there's any close logic in the C++ Env, call it
-        # Or just rely on destructor
-        pass

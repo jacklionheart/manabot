@@ -79,13 +79,3 @@ class VectorEnv:
             # Each step_result is (obs, reward, terminated, truncated, info)
 
         return step_results
-
-    def close(self):
-        """
-        Clean up resources and shut down the thread pool.
-        """
-        with self.lock:
-            self.executor.shutdown(wait=True)
-            for env in self.envs:
-                if hasattr(env, "close"):
-                    env.close()

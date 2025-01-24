@@ -1,201 +1,591 @@
-"""
-representation.py
-
-Feature encoding logic for manabot Observations.
-Denormalizes the data and converts it to numeric arrays
-for neural network consumption.
-"""
-
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from dataclasses import dataclass
+from typing import Dict, Tuple, List
+import warnings
 import numpy as np
-    
-from .observation import Observation, ZoneEnum, CardTypes
+import torch
+
+from .observation import (
+    Observation,
+    PhaseEnum,
+    StepEnum,
+    ActionEnum,
+    ZoneEnum
+)
+
+from dataclasses import dataclass
+from typing import Dict, Tuple, List
+import warnings
+import numpy as np
+import torch
+
+from .observation import (
+    Observation,
+    PhaseEnum,
+    StepEnum,
+    ActionEnum,
+    ZoneEnum
+)
 
 @dataclass
-class CardEmbedding:
+class InputTensorSpace:
     """
-    Holds an embedding_map from registry_key -> np.ndarray.
+    InputTensorSpace defines the tensor representation for neural network input.
+    The representation consists of five main components:
+    - global: Game-level state (turn, phase, etc.)
+    - players: Per-player features
+    - cards: Card features across all zones
+    - permanents: Features for objects on the battlefield
+    - actions: Available actions and their focus objects
+
+    Focus objects (referenced by actions) are represented as concatenated 
+    player/card/permanent features, with only the relevant section populated.
     """
-    embedding_dim: int
-    embedding_map: Dict[int, np.ndarray] = field(default_factory=dict)
+    # Basic capacities
+    num_players: int = 2
+    max_cards: int = 100
+    max_permanents: int = 50
+    max_actions: int = 20
+    max_focus_objects: int = 2
 
-    def get(self, registry_key: int) -> np.ndarray:
-        return self.embedding_map.get(registry_key, np.zeros(self.embedding_dim, dtype=np.float32))
+    # Enumeration sizes (derived from game rules)
+    phase_count: int = len(PhaseEnum)    # 5
+    step_count: int = len(StepEnum)      # 12
+    action_count: int = len(ActionEnum)  # 5
+    zone_count: int = len(ZoneEnum)      # 7
 
-
-@dataclass
-class FeatureConfig:
-    """
-    Toggle options for how we encode the game state into arrays.
-    """
-    include_card_features: bool = True
-    include_permanent_features: bool = True
-    max_objects: Optional[int] = None
-    registry_one_hot: bool = False
-    registry_embeddings: bool = False
-    card_embedding: Optional[CardEmbedding] = None
-
-    def __post_init__(self):
-        if self.registry_one_hot and self.registry_embeddings:
-            raise ValueError("Cannot use both one-hot registry_key and embeddings at the same time.")
-
-
-@dataclass
-class GameObject:
-    """
-    Denormalized object combining Card + (optional) Permanent fields.
-    """
-    id: int
-    zone: ZoneEnum
-    owner_id: int
-    registry_key: int
-    power: int
-    toughness: int
-    mana_cost: List[int] = field(default_factory=lambda: [0]*6)
-    mana_value: int = 0
-    card_type: CardTypes = field(default_factory=lambda: CardTypes(
-        is_castable=False,
-        is_permanent=False,
-        is_non_land_permanent=False,
-        is_non_creature_permanent=False,
-        is_spell=False,
-        is_creature=False,
-        is_land=False,
-        is_planeswalker=False,
-        is_enchantment=False,
-        is_artifact=False,
-        is_kindred=False,
-        is_battle=False,
-    ))
-
-    controller_id: Optional[int] = None
-    tapped: bool = False
-    damage: int = 0
-    is_summoning_sick: bool = False
-
-    def to_array(self, config: FeatureConfig) -> np.ndarray:
+    @property
+    def global_dim(self) -> int:
         """
-        Convert this object to a numeric feature vector based on config.
+        Number of features in the global state vector:
+        - turn_number (1)
+        - phase one-hot (phase_count)
+        - step one-hot (step_count)
+        - game_over, won flags (2)
         """
-        import numpy as np
+        return 1 + self.phase_count + self.step_count + 2
 
-        base_fields = [
-            self.id,
-            int(self.zone),
-            self.owner_id,
-            self.power,
-            self.toughness,
-            self.damage,
-            self.controller_id if self.controller_id is not None else -1
+    @property
+    def player_dim(self) -> int:
+        """
+        Features per player:
+        - life total (1)
+        - is_active flag (1)
+        - is_agent flag (1)
+        - zone_counts array (zone_count)
+        """
+        return 1 + 1 + 1 + self.zone_count
+
+    @property
+    def card_dim(self) -> int:
+        """
+        Features per card:
+        - zone one-hot (zone_count)
+        - owner_id (1)
+        - power, toughness (2)
+        - mana_value (1)
+        - type flags (6): land, creature, artifact, enchantment, planeswalker, battle
+        """
+        return self.zone_count + 1 + 2 + 1 + 6
+
+    @property
+    def permanent_dim(self) -> int:
+        """
+        Features per permanent:
+        - controller_id (1)
+        - tapped flag (1)
+        - damage (1)
+        - power, toughness (2)
+        - summoning_sick flag (1)
+        - type flags (4): land, creature, artifact, enchantment
+        """
+        return 1 + 1 + 1 + 2 + 1 + 4
+
+    @property
+    def focus_object_dim(self) -> int:
+        """
+        Dimension for a focus object, which could be any game object.
+        We concatenate space for all types, filling only the relevant section:
+        - player features
+        - card features
+        - permanent features
+        """
+        return self.player_dim + self.card_dim + self.permanent_dim
+
+    @property
+    def action_dim(self) -> int:
+        """
+        Features per action:
+        - action_type one-hot (action_count)
+        - focus objects (max_focus_objects * focus_object_dim)
+        """
+        return self.action_count + (self.max_focus_objects * self.focus_object_dim)
+
+    @property 
+    def shapes(self) -> Dict[str, Tuple[int, ...]]:
+        """
+        Returns expected shapes for each tensor in the encoded observation.
+        """
+        return {
+            'global': (self.global_dim,),
+            'players': (self.num_players, self.player_dim),
+            'cards': (self.max_cards, self.card_dim),
+            'permanents': (self.max_permanents, self.permanent_dim),
+            'actions': (self.max_actions, self.action_dim)
+        }
+
+    def encode_global(self, obs: Observation) -> torch.Tensor:
+        """
+        Encode global game state features.
+        
+        Returns:
+            torch.Tensor with shape (global_dim,) containing turn number,
+            phase/step one-hots, and game state flags.
+        
+        Raises:
+            ValueError: If the encoded tensor shape doesn't match expected shape.
+        """
+        arr = np.zeros(self.shapes['global'], dtype=np.float32)
+        i = 0
+        
+        # Turn number
+        arr[i] = float(obs.turn.turn_number)
+        i += 1
+        
+        # Phase one-hot
+        phase_hot = np.zeros(self.phase_count, dtype=np.float32)
+        if 0 <= obs.turn.phase < self.phase_count:
+            phase_hot[obs.turn.phase] = 1.0
+        arr[i:i + self.phase_count] = phase_hot
+        i += self.phase_count
+        
+        # Step one-hot
+        step_hot = np.zeros(self.step_count, dtype=np.float32)
+        if 0 <= obs.turn.step < self.step_count:
+            step_hot[obs.turn.step] = 1.0
+        arr[i:i + self.step_count] = step_hot
+        i += self.step_count
+        
+        # Game state flags
+        arr[i] = 1.0 if obs.game_over else 0.0
+        i += 1
+        arr[i] = 1.0 if obs.won else 0.0
+        
+        tensor = torch.tensor(arr, dtype=torch.float32)
+        expected_shape = self.shapes['global']
+        if tensor.shape != expected_shape:
+            raise ValueError(f"Global tensor shape mismatch: got {tensor.shape}, expected {expected_shape}")
+        return tensor
+
+    def encode_players(self, obs: Observation) -> torch.Tensor:
+        """
+        Encode player features into a fixed-size tensor.
+        
+        Returns:
+            torch.Tensor with shape (num_players, player_dim) containing
+            encoded features for each player.
+            
+        Raises:
+            ValueError: If the encoded tensor shape doesn't match expected shape.
+        """
+        arr = np.zeros(self.shapes['players'], dtype=np.float32)
+        for idx, (pid, player) in enumerate(obs.players.items()):
+            if idx >= self.num_players:
+                warnings.warn(f"Too many players ({len(obs.players)}); truncating to {self.num_players}.")
+                break
+                
+            row = np.zeros(self.player_dim, dtype=np.float32)
+            i = 0
+            row[i] = float(player.life)
+            i += 1
+            row[i] = 1.0 if player.is_active else 0.0
+            i += 1
+            row[i] = 1.0 if player.is_agent else 0.0
+            i += 1
+            row[i:i + self.zone_count] = player.zone_counts[:self.zone_count]
+            arr[idx] = row
+            
+        tensor = torch.tensor(arr, dtype=torch.float32)
+        expected_shape = self.shapes['players']
+        if tensor.shape != expected_shape:
+            raise ValueError(f"Players tensor shape mismatch: got {tensor.shape}, expected {expected_shape}")
+        return tensor
+
+    def encode_cards(self, obs: Observation) -> torch.Tensor:
+        """
+        Encode card features into a fixed-size tensor.
+        
+        Returns:
+            torch.Tensor with shape (max_cards, card_dim) containing
+            encoded features for each card.
+            
+        Raises:
+            ValueError: If the encoded tensor shape doesn't match expected shape.
+        """
+        arr = np.zeros(self.shapes['cards'], dtype=np.float32)
+        card_ids = sorted(obs.cards.keys())
+        if len(card_ids) > self.max_cards:
+            warnings.warn(f"Too many cards ({len(card_ids)}); truncating to {self.max_cards}.")
+            
+        for idx, cid in enumerate(card_ids[:self.max_cards]):
+            card = obs.cards[cid]
+            row = np.zeros(self.card_dim, dtype=np.float32)
+            i = 0
+            
+            # Zone one-hot
+            zone_hot = np.zeros(self.zone_count, dtype=np.float32)
+            if 0 <= card.zone < self.zone_count:
+                zone_hot[card.zone] = 1.0
+            row[i:i + self.zone_count] = zone_hot
+            i += self.zone_count
+            
+            # Basic properties
+            row[i] = float(card.owner_id)
+            i += 1
+            row[i] = float(card.power)
+            i += 1
+            row[i] = float(card.toughness)
+            i += 1
+            row[i] = float(card.mana_cost.mana_value)
+            i += 1
+            
+            # Type flags
+            row[i] = 1.0 if card.card_types.is_land else 0.0
+            i += 1
+            row[i] = 1.0 if card.card_types.is_creature else 0.0
+            i += 1
+            row[i] = 1.0 if card.card_types.is_artifact else 0.0
+            i += 1
+            row[i] = 1.0 if card.card_types.is_enchantment else 0.0
+            i += 1
+            row[i] = 1.0 if card.card_types.is_planeswalker else 0.0
+            i += 1
+            row[i] = 1.0 if card.card_types.is_battle else 0.0
+            
+            arr[idx] = row
+            
+        tensor = torch.tensor(arr, dtype=torch.float32)
+        expected_shape = self.shapes['cards']
+        if tensor.shape != expected_shape:
+            raise ValueError(f"Cards tensor shape mismatch: got {tensor.shape}, expected {expected_shape}")
+        return tensor
+
+    def encode_permanents(self, obs: Observation) -> torch.Tensor:
+        """
+        Encode permanent features into a fixed-size tensor.
+        
+        Returns:
+            torch.Tensor with shape (max_permanents, permanent_dim) containing
+            encoded features for each permanent.
+            
+        Raises:
+            ValueError: If the encoded tensor shape doesn't match expected shape.
+        """
+        arr = np.zeros(self.shapes['permanents'], dtype=np.float32)
+        perm_ids = sorted(obs.permanents.keys())
+        if len(perm_ids) > self.max_permanents:
+            warnings.warn(f"Too many permanents ({len(perm_ids)}); truncating to {self.max_permanents}.")
+            
+        for idx, pid in enumerate(perm_ids[:self.max_permanents]):
+            perm = obs.permanents[pid]
+            row = np.zeros(self.permanent_dim, dtype=np.float32)
+            i = 0
+            
+            # Basic properties
+            row[i] = float(perm.controller_id)
+            i += 1
+            row[i] = 1.0 if perm.tapped else 0.0
+            i += 1
+            row[i] = float(perm.damage)
+            i += 1
+            row[i] = 0.0  # power placeholder
+            i += 1
+            row[i] = 0.0  # toughness placeholder
+            i += 1
+            row[i] = 1.0 if perm.is_summoning_sick else 0.0
+            i += 1
+            
+            # Type flags
+            row[i] = 1.0 if perm.is_land else 0.0
+            i += 1
+            row[i] = 1.0 if perm.is_creature else 0.0
+            i += 1
+            row[i] = 0.0  # is_artifact placeholder
+            i += 1
+            row[i] = 0.0  # is_enchantment placeholder
+            
+            arr[idx] = row
+            
+        tensor = torch.tensor(arr, dtype=torch.float32)
+        expected_shape = self.shapes['permanents']
+        if tensor.shape != expected_shape:
+            raise ValueError(f"Permanents tensor shape mismatch: got {tensor.shape}, expected {expected_shape}")
+        return tensor
+
+    def encode_focus_object(self, obs: Observation, obj_id: int) -> np.ndarray:
+        """
+        Encode a single focus object (player/card/permanent) into the universal format.
+        The encoding has three sections in this order:
+        1. Player features (if obj_id is a player)
+        2. Card features (if obj_id is a card)
+        3. Permanent features (if obj_id is a permanent)
+        Only one section will be populated; others remain zero.
+
+        Returns:
+            np.ndarray: Focus object encoding with shape (focus_object_dim,)
+        """
+        row = np.zeros(self.focus_object_dim, dtype=np.float32)
+        
+        # Try encoding as player (offset = 0)
+        if obj_id in obs.players:
+            player = obs.players[obj_id]
+            i = 0  # Player section starts at beginning
+            
+            # Life total
+            row[i] = float(player.life)
+            i += 1
+            # Activity flags
+            row[i] = 1.0 if player.is_active else 0.0
+            i += 1
+            row[i] = 1.0 if player.is_agent else 0.0
+            i += 1
+            # Zone counts
+            row[i:i + self.zone_count] = player.zone_counts[:self.zone_count]
+            
+        # Try encoding as card (offset = player_dim)
+        elif obj_id in obs.cards:
+            card = obs.cards[obj_id]
+            i = self.player_dim  # Card section starts after player section
+            
+            # Zone one-hot
+            zone_hot = np.zeros(self.zone_count, dtype=np.float32)
+            if 0 <= card.zone < self.zone_count:
+                zone_hot[card.zone] = 1.0
+            row[i:i + self.zone_count] = zone_hot
+            i += self.zone_count
+            
+            # Basic properties
+            row[i] = float(card.owner_id)
+            i += 1
+            row[i] = float(card.power)
+            i += 1
+            row[i] = float(card.toughness)
+            i += 1
+            row[i] = float(card.mana_cost.mana_value)
+            i += 1
+            
+            # Type flags
+            row[i] = 1.0 if card.card_types.is_land else 0.0
+            i += 1
+            row[i] = 1.0 if card.card_types.is_creature else 0.0
+            i += 1
+            row[i] = 1.0 if card.card_types.is_artifact else 0.0
+            i += 1
+            row[i] = 1.0 if card.card_types.is_enchantment else 0.0
+            i += 1
+            row[i] = 1.0 if card.card_types.is_planeswalker else 0.0
+            i += 1
+            row[i] = 1.0 if card.card_types.is_battle else 0.0
+            
+        # Try encoding as permanent (offset = player_dim + card_dim)
+        elif obj_id in obs.permanents:
+            permanent = obs.permanents[obj_id]
+            i = self.player_dim + self.card_dim  # Permanent section starts after player and card sections
+            
+            # Controller and state
+            row[i] = float(permanent.controller_id)
+            i += 1
+            row[i] = 1.0 if permanent.tapped else 0.0
+            i += 1
+            row[i] = float(permanent.damage)
+            i += 1
+            row[i] = 0.0  # power placeholder
+            i += 1
+            row[i] = 0.0  # toughness placeholder
+            i += 1
+            row[i] = 1.0 if permanent.is_summoning_sick else 0.0
+            i += 1
+            
+            # Type flags
+            row[i] = 1.0 if permanent.is_land else 0.0
+            i += 1
+            row[i] = 1.0 if permanent.is_creature else 0.0
+            i += 1
+            row[i] = 0.0  # is_artifact placeholder
+            i += 1
+            row[i] = 0.0  # is_enchantment placeholder
+            
+        return row
+            
+        offset += self.player_dim
+        
+        # Try encoding as card
+        if obj_id in obs.cards:
+            card = obs.cards[obj_id]
+            i = offset
+            zone_hot = np.zeros(self.zone_count, dtype=np.float32)
+            if 0 <= card.zone < self.zone_count:
+                zone_hot[card.zone] = 1.0
+            row[i:i + self.zone_count] = zone_hot
+            i += self.zone_count
+            row[i] = float(card.owner_id)
+            i += 1
+            row[i] = float(card.power)
+            i += 1
+            row[i] = float(card.toughness)
+            i += 1
+            row[i] = float(card.mana_cost.mana_value)
+            i += 1
+            row[i] = 1.0 if card.card_types.is_land else 0.0
+            i += 1
+            row[i] = 1.0 if card.card_types.is_creature else 0.0
+            i += 1
+            row[i] = 1.0 if card.card_types.is_artifact else 0.0
+            i += 1
+            row[i] = 1.0 if card.card_types.is_enchantment else 0.0
+            i += 1
+            row[i] = 1.0 if card.card_types.is_planeswalker else 0.0
+            i += 1
+            row[i] = 1.0 if card.card_types.is_battle else 0.0
+            return row
+            
+        offset += self.card_dim
+        
+        # Try encoding as permanent
+        if obj_id in obs.permanents:
+            perm = obs.permanents[obj_id]
+            i = offset
+            row[i] = float(perm.controller_id)
+            i += 1
+            row[i] = 1.0 if perm.tapped else 0.0
+            i += 1
+            row[i] = float(perm.damage)
+            i += 1
+            row[i] = 0.0  # power placeholder
+            i += 1
+            row[i] = 0.0  # toughness placeholder
+            i += 1
+            row[i] = 1.0 if perm.is_summoning_sick else 0.0
+            i += 1
+            row[i] = 1.0 if perm.is_land else 0.0
+            i += 1
+            row[i] = 1.0 if perm.is_creature else 0.0
+            i += 1
+            row[i] = 0.0  # is_artifact placeholder
+            i += 1
+            row[i] = 0.0  # is_enchantment placeholder
+            
+        return row
+
+    def encode_actions(self, obs: Observation) -> torch.Tensor:
+        """
+        Encode available actions and their focus objects into a fixed-size tensor.
+        
+        Returns:
+            torch.Tensor with shape (max_actions, action_dim) containing
+            encoded features for each action and its focus objects.
+            
+        Raises:
+            ValueError: If the encoded tensor shape doesn't match expected shape.
+        """
+        arr = np.zeros(self.shapes['actions'], dtype=np.float32)
+        
+        for i, action in enumerate(obs.action_space.actions[:self.max_actions]):
+            if i >= self.max_actions:
+                warnings.warn(f"Too many actions ({len(obs.action_space.actions)}); truncating to {self.max_actions}.")
+                break
+                
+            # Action type one-hot
+            action_hot = np.zeros(self.action_count, dtype=np.float32)
+            if 0 <= action.action_type < self.action_count:
+                action_hot[action.action_type] = 1.0
+            arr[i, :self.action_count] = action_hot
+            
+            # Encode focus objects
+            for f_idx, focus_id in enumerate(action.focus[:self.max_focus_objects]):
+                if f_idx >= self.max_focus_objects:
+                    warnings.warn(f"Action {i} has too many focus objects; truncating to {self.max_focus_objects}.")
+                    break
+                    
+                # Calculate offset into the action tensor for this focus object
+                focus_offset = self.action_count + (f_idx * self.focus_object_dim)
+                
+                # Encode the focus object and place it in the action tensor
+                focus_encoding = self.encode_focus_object(obs, focus_id)
+                arr[i, focus_offset:focus_offset + self.focus_object_dim] = focus_encoding
+                
+        tensor = torch.tensor(arr, dtype=torch.float32)
+        expected_shape = self.shapes['actions']
+        if tensor.shape != expected_shape:
+            raise ValueError(f"Actions tensor shape mismatch: got {tensor.shape}, expected {expected_shape}")
+        return tensor
+
+    def encode_full_observation(self, obs: Observation) -> Dict[str, torch.Tensor]:
+        """
+        Encode a complete observation into a dictionary of tensors.
+        
+        Returns:
+            Dictionary with keys matching self.shapes, containing encoded tensors
+            for each aspect of the game state.
+            
+        Raises:
+            ValueError: If any encoded tensor doesn't match its expected shape.
+            
+        Note:
+            This method verifies that all encoded tensors match their expected
+            shapes from self.shapes before returning. Individual encoding methods
+            also perform their own shape validation.
+        """
+        tensors = {
+            'global': self.encode_global(obs),
+            'players': self.encode_players(obs),
+            'cards': self.encode_cards(obs),
+            'permanents': self.encode_permanents(obs),
+            'actions': self.encode_actions(obs)
+        }
+        
+        # Double-check all shapes match expected shapes
+        for name, tensor in tensors.items():
+            expected_shape = self.shapes[name]
+            if tensor.shape != expected_shape:
+                raise ValueError(
+                    f"Shape mismatch in encode_full_observation for {name}: "
+                    f"got {tensor.shape}, expected {expected_shape}"
+                )
+                
+        return tensors
+
+    def get_total_dims(self) -> Dict[str, int]:
+        """
+        Calculate total dimensions (number of elements) for each tensor type.
+        Useful for network architecture design.
+        """
+        return {
+            name: int(np.prod(shape)) 
+            for name, shape in self.shapes.items()
+        }
+
+    def debug_string(self) -> str:
+        """Generate a debug representation of the tensor space configuration."""
+        lines = [
+            "=== InputTensorSpace Configuration ===",
+            "Capacity:",
+            f"  Players: {self.num_players}",
+            f"  Cards: {self.max_cards}",
+            f"  Permanents: {self.max_permanents}",
+            f"  Actions: {self.max_actions}",
+            f"  Focus Objects per Action: {self.max_focus_objects}",
+            "",
+            "Feature Dimensions:",
+            f"  Global: {self.global_dim}",
+            f"  Player: {self.player_dim}",
+            f"  Card: {self.card_dim}",
+            f"  Permanent: {self.permanent_dim}",
+            f"  Focus Object: {self.focus_object_dim}",
+            f"  Action: {self.action_dim}",
+            "",
+            "Output Shapes:"
         ]
-
-        # Registry encoding
-        if config.registry_embeddings and config.card_embedding:
-            reg_part = config.card_embedding.get(self.registry_key)
-        elif config.registry_one_hot:
-            # Example: a fixed 2000-size array
-            arr_size = 2000
-            reg_part = np.zeros(arr_size, dtype=np.int32)
-            if 0 <= self.registry_key < arr_size:
-                reg_part[self.registry_key] = 1
-        else:
-            reg_part = np.array([self.registry_key], dtype=np.int32)
-
-        card_features = []
-        if config.include_card_features:
-            card_features.extend(self.mana_cost)  # 6 elements
-            card_features.append(self.mana_value)
-            card_features.append(int(self.card_type.is_creature))
-            card_features.append(int(self.card_type.is_land))
-            card_features.append(int(self.card_type.is_permanent))
-
-        perm_features = []
-        if config.include_permanent_features and self.controller_id is not None:
-            perm_features.append(int(self.tapped))
-            perm_features.append(int(self.is_summoning_sick))
-        else:
-            perm_features.extend([0, 0])
-
-        parts = [
-            np.array(base_fields, dtype=np.int32),
-            reg_part,
-            np.array(card_features, dtype=np.int32) if card_features else np.array([], dtype=np.int32),
-            np.array(perm_features, dtype=np.int32)
-        ]
-
-        # If using float embeddings, cast everything to float so it can be concatenated
-        if config.registry_embeddings and config.card_embedding:
-            float_parts = []
-            for p in parts:
-                if p.dtype != np.float32:
-                    p = p.astype(np.float32)
-                float_parts.append(p)
-            return np.concatenate(float_parts, axis=0)
-        else:
-            return np.concatenate(parts, axis=0)
-
-
-class RepresentationEncoder:
-    """
-    Converts Observations into a 2D array of shape [num_objects, feature_dim].
-    """
-
-    def __init__(self, config: Optional[FeatureConfig] = None):
-        self.config = config or FeatureConfig()
-
-    def denormalize_objects(self, obs: Observation) -> List[GameObject]:
-        dn_objects = []
-        for cid, cdat in obs.cards.items():
-            go = GameObject(
-                id=cdat.id,
-                zone=cdat.zone,
-                owner_id=cdat.owner_id,
-                registry_key=cdat.registry_key,
-                power=cdat.power,
-                toughness=cdat.toughness,
-                mana_cost=cdat.mana_cost.cost,
-                mana_value=cdat.mana_cost.mana_value,
-                card_type=cdat.card_types
-            )
-            # If on battlefield, overlay Permanent
-            if cdat.zone == ZoneEnum.BATTLEFIELD and cid in obs.permanents:
-                pdat = obs.permanents[cid]
-                go.controller_id = pdat.controller_id
-                go.tapped = pdat.tapped
-                go.damage = pdat.damage
-                go.is_summoning_sick = pdat.is_summoning_sick
-
-            dn_objects.append(go)
-
-        return dn_objects
-
-    def encode_objects(self, dn_objects: List[GameObject]) -> np.ndarray:
-        import numpy as np
-        if not dn_objects:
-            return np.zeros((0, 0), dtype=np.int32)
-
-        arrays = [obj.to_array(self.config) for obj in dn_objects]
-        shape_set = {arr.shape for arr in arrays}
-        if len(shape_set) != 1:
-            raise ValueError(f"Inconsistent shapes among objects: {shape_set}")
-
-        mat = np.stack(arrays, axis=0)
-
-        # Optionally pad
-        if self.config.max_objects is not None and self.config.max_objects > 0:
-            if mat.shape[0] < self.config.max_objects:
-                diff = self.config.max_objects - mat.shape[0]
-                fill_val = -1
-                if mat.dtype == np.float32:
-                    fill_val = -1.0
-                pad_block = np.full((diff, mat.shape[1]), fill_val, dtype=mat.dtype)
-                mat = np.concatenate([mat, pad_block], axis=0)
-            else:
-                mat = mat[: self.config.max_objects]
-
-        return mat
-
-    def encode_game_state(self, obs: Observation) -> np.ndarray:
-        dn_objs = self.denormalize_objects(obs)
-        return self.encode_objects(dn_objs)
+        for name, shape in self.shapes.items():
+            lines.append(f"  {name}: {shape}")
+            
+        return "\n".join(lines)
