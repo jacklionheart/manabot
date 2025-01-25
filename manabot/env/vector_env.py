@@ -5,7 +5,6 @@ from numpy import ndarray
 from concurrent.futures import ThreadPoolExecutor
 import threading
 
-from manabot.data import Observation
 from .env import Env
 from .config import PlayerConfig
 
@@ -27,7 +26,7 @@ class VectorEnv:
     def reset(
         self,
         player_configs_list: List[List[PlayerConfig]]
-    ) -> List[Tuple[Observation, Dict[str, str]]]:
+    ) -> List[Tuple[Dict, Dict[str, str]]]:
         """
         Reset each environment in parallel.
 
@@ -55,7 +54,7 @@ class VectorEnv:
     def step(
         self,
         actions: ndarray
-    ) -> List[Tuple[Observation, float, bool, bool, Dict[str, str]]]:
+    ) -> List[Tuple[Dict, float, bool, bool, Dict[str, str]]]:
         """
         Take a step in all environments in parallel.
 

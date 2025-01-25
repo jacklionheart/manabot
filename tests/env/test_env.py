@@ -1,7 +1,6 @@
 import unittest
 
 from manabot.env import Env
-from manabot.data import Observation
 import managym  # The C++ module
 
 
@@ -13,22 +12,18 @@ class TestEnv(unittest.TestCase):
 
     def test_reset(self):
         obs, info = self.env.reset([self.player_a, self.player_b])
-        self.assertIsInstance(obs, Observation)
-        self.assertFalse(obs.game_over)
+        self.assertIsInstance(obs, dict)
         self.assertIn("Alice", [self.player_a.name, self.player_b.name])  # sanity check
 
     def test_step(self):
         obs, info = self.env.reset([self.player_a, self.player_b])
         # Pick an action index, e.g. 0
         next_obs, reward, done, truncated, step_info = self.env.step(0)
-        self.assertIsInstance(next_obs, Observation)
+        self.assertIsInstance(next_obs, dict)
         self.assertIsInstance(reward, float)
         self.assertIsInstance(done, bool)
         self.assertIsInstance(truncated, bool)
         self.assertIsInstance(step_info, dict)
-
-        # Possibly check that we haven't broken any field conversions
-        self.assertTrue(next_obs.validate(), "Pythonic observation should pass validation")
 
     def test_game_completes(self):
         """
@@ -44,8 +39,6 @@ class TestEnv(unittest.TestCase):
         
         # Reset and verify initial state
         obs, info = self.env.reset([self.player_a, self.player_b])
-        self.assertFalse(obs.game_over)  # Game shouldn't be over at start
-        self.assertIsNotNone(obs.action_space)  # Should have valid actions
         
         # Run for a maximum number of steps
         max_steps = 1000  # Generous limit to ensure game can complete
@@ -58,19 +51,13 @@ class TestEnv(unittest.TestCase):
             next_obs, reward, terminated, truncated, info = self.env.step(0)
             steps_taken += 1
             
-            # Check observation validity
-            self.assertTrue(next_obs.validate())
-            
             # If game is over, verify terminal state
             if terminated:
                 game_completed = True
-                self.assertTrue(next_obs.game_over)  # Game state should match termination
-                self.assertIsNotNone(next_obs.won)   # Win/loss should be determined
                 break
                 
-            # Even if not terminated, verify basic observation properties
-            self.assertGreaterEqual(next_obs.turn.turn_number, 0)
-            self.assertIsNotNone(next_obs.action_space)
+            # check turn count increased
+            self.assertGreaterEqual(next_obs['global'][0], 1)
         
         # Verify game completed successfully
         self.assertTrue(game_completed, 
@@ -78,16 +65,7 @@ class TestEnv(unittest.TestCase):
         self.assertLess(steps_taken, max_steps, 
                        "Game took maximum number of steps, might indicate infinite loop")
         
-    # If you also test your from_managym_observation logic directly:
-    def test_observation_conversion(self):
-        cpp_env = managym.Env()
-        cpp_obs, cpp_info = cpp_env.reset([self.player_a, self.player_b])
-        py_obs = Observation(cpp_obs)
-        
-        # Check that fields match
-        self.assertEqual(py_obs.game_over, cpp_obs.game_over)
-        self.assertEqual(py_obs.turn.turn_number, cpp_obs.turn.turn_number)
-        # etc.
+
 
 if __name__ == "__main__":
     unittest.main()

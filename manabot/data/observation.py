@@ -302,8 +302,10 @@ class ObservationEncoder:
 
 
 class ObservationSpace(spaces.Space):
-    def __init__(self, encoder: ObservationEncoder):
+    def __init__(self, encoder: ObservationEncoder | None = None):
         super().__init__(shape=None, dtype=None)
+        if encoder is None:
+            encoder = ObservationEncoder()
         self.encoder = encoder
         
         # Instead of bounding these arrays, we let them be unbounded. 
