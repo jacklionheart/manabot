@@ -11,6 +11,8 @@ dependencies = [
     "torch>=2.0.0",
     "numpy>=1.24.0",
     "pandas>=2.0.0",
+    "gymnasium>=1.0.0",
+    "managym>=0.1.0",
 ]
 
 [project.optional-dependencies]

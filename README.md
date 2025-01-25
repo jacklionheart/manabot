@@ -49,13 +49,13 @@ pytest tests/
 Files should follow this template:
 
 ```python
-# filename.py
-# One-line purpose of file
 
 """
-EDITING INSTRUCTIONS:    
-Instructions for collaborators (both human and LLM) on how to approach editing.
-Keep these focused and impactful.
+filename.py
+One-line purpose of file
+
+Instructions for collaborators (both human and LLM) on how to approach understanding and editing the code.
+Keep this section focused and impactful.
 """
 
 # Standard library
