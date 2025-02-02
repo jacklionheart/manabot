@@ -12,8 +12,7 @@ import numpy as np
 
 import managym
 from .observation import ObservationSpace
-from .match import Match
-from .reward import Reward
+from .match import Match, Reward
 
 class Env(gym.Env):
     metadata = {"render_modes": ["human"], "render_fps": 30}

@@ -18,9 +18,10 @@ import logging
 from typing import Dict, Tuple, List
 
 import numpy as np
+import psutil
 import torch
 import torch.nn as nn
-
+import wandb
 from manabot.ppo.agent import Agent
 from manabot.infra.experiment import Experiment
 from manabot.infra.hypers import TrainHypers
@@ -246,7 +247,6 @@ class Trainer:
             eps=1e-5,
             weight_decay=0.01
         )
-        self.writer = experiment.writer
 
         # Create a multi-agent buffer (assuming 2 players).
         self.multi_buffer = MultiAgentBuffer(
@@ -260,6 +260,15 @@ class Trainer:
         # If this many consecutive invalid batches are encountered, halt training.
         self.invalid_batch_threshold = 5
 
+        self.wandb = self.experiment.wandb_run
+
+        if self.wandb:
+            self.wandb.summary.update({
+                "max_episode_return": float("-inf"),
+                "best_win_rate": 0.0,
+                "time_to_converge": None,
+            })
+        
     def train(self) -> None:
         """
         Execute the PPO training loop.
@@ -267,9 +276,11 @@ class Trainer:
         hypers = self.hypers
         env = self.env
         device = self.experiment.device
-        num_updates = hypers.total_timesteps // hypers.batch_size
+        batch_size = hypers.num_envs * hypers.num_steps
+        minibatch_size = batch_size // hypers.num_minibatches
+        num_updates = hypers.total_timesteps // batch_size  
         global_step = 0
-        start_time = time.time()
+        self.start_time = time.time()
 
         try:
             # Reset environment.
@@ -320,8 +331,6 @@ class Trainer:
                 # PPO updates
                 ############################################################
                 
-                batch_size = hypers.batch_size
-                minibatch_size = hypers.minibatch_size
                 clipfracs = []
                 approx_kl = 0.0
 
@@ -348,7 +357,10 @@ class Trainer:
                         )
                         clipfracs.append(clip_fraction)
 
-                        if hypers.target_kl is not None and approx_kl > hypers.target_kl:
+                        if update % 10 == 0:
+                            self._log_system_metrics()
+
+                        if hypers.target_kl != float("inf") and approx_kl > hypers.target_kl:
                             logger.info(f"Early stopping at epoch {epoch} due to KL divergence {approx_kl:.4f}")
                             break
 
@@ -357,10 +369,10 @@ class Trainer:
                 var_y = np.var(y_true)
                 explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
-                self.writer.add_scalar("charts/learning_rate", self.optimizer.param_groups[0]["lr"], global_step)
-                self.writer.add_scalar("losses/explained_variance", explained_var, global_step)
-                sps = int(global_step / (time.time() - start_time))
-                self.writer.add_scalar("charts/SPS", sps, global_step)
+                self.experiment.add_scalar("charts/learning_rate", self.optimizer.param_groups[0]["lr"], global_step)
+                self.experiment.add_scalar("losses/explained_variance", explained_var, global_step)
+                sps = int(global_step / (time.time() - self.start_time))
+                self.experiment.add_scalar("charts/SPS", sps, global_step)
 
                 logger.info(f"Update {update}/{num_updates} | SPS: {sps} | Buffer sizes: {[buf.step_idx for buf in self.multi_buffer.buffers.values()]}")
 
@@ -369,7 +381,7 @@ class Trainer:
             raise
         finally:
             env.close()
-            self.writer.close()
+            self.experiment.close()
 
     def save_checkpoint(self, path: str) -> None:
         """Save the current state of the agent, optimizer, and hyperparameters."""
@@ -433,10 +445,17 @@ class Trainer:
                 if isinstance(episode_info, dict):
                     actor_id = int(actor_ids[idx].item())
                     if "r" in episode_info and "l" in episode_info:
-                        self.writer.add_scalar(f"charts/player{actor_id}/episodic_return",
+                        self.experiment.add_scalar(f"charts/player{actor_id}/episodic_return",
                                             episode_info["r"], self.global_step)
-                        self.writer.add_scalar(f"charts/player{actor_id}/episodic_length",
+                        self.experiment.add_scalar(f"charts/player{actor_id}/episodic_length",
                                             episode_info["l"], self.global_step)
+                        
+                        if self.wandb:
+                            if episode_info["r"] > self.wandb.summary.get("max_episode_return", float("-inf")):
+                                self.wandb.summary["max_episode_return"] = episode_info["r"]
+                                # Optionally add which player achieved it
+                                self.wandb.summary["max_return_player"] = actor_id
+
 
         return new_obs, done, new_actor_ids
 
@@ -484,15 +503,15 @@ class Trainer:
             
         # Log buffer statistics per player
         for pid, buf in self.multi_buffer.buffers.items():
-            self.writer.add_scalar(f"charts/player{pid}/buffer_size", buf.step_idx, self.global_step)
+            self.experiment.add_scalar(f"charts/player{pid}/buffer_size", buf.step_idx, self.global_step)
             if buf.step_idx > 0:
-                self.writer.add_scalar(
+                self.experiment.add_scalar(
                     f"charts/player{pid}/mean_value",
                     buf.values[:buf.step_idx].mean().item(),
                     self.global_step
                 )
                 if buf.advantages is not None:
-                    self.writer.add_scalar(
+                    self.experiment.add_scalar(
                         f"charts/player{pid}/mean_advantage",
                         buf.advantages[:buf.step_idx].mean().item(),
                         self.global_step
@@ -564,11 +583,24 @@ class Trainer:
             clip_fraction = (torch.abs(ratio - 1) > hypers.clip_coef).float().mean().item()
 
         # Log metrics
-        self.writer.add_scalar("losses/policy_loss", pg_loss.item(), self.global_step)
-        self.writer.add_scalar("losses/value_loss", v_loss.item(), self.global_step)
-        self.writer.add_scalar("losses/entropy", entropy_loss.item(), self.global_step)
-        self.writer.add_scalar("losses/approx_kl", approx_kl, self.global_step)
-        self.writer.add_scalar("losses/clip_fraction", clip_fraction, self.global_step)
+        self.experiment.add_scalar("losses/policy_loss", pg_loss.item(), self.global_step)
+        self.experiment.add_scalar("losses/value_loss", v_loss.item(), self.global_step)
+        self.experiment.add_scalar("losses/entropy", entropy_loss.item(), self.global_step)
+        self.experiment.add_scalar("losses/approx_kl", approx_kl, self.global_step)
+        self.experiment.add_scalar("losses/clip_fraction", clip_fraction, self.global_step)
+
+        if self.wandb:
+            self.wandb.log({
+                "ppo/losses": {
+                    "policy": pg_loss.item(),
+                    "value": v_loss.item(),
+                    "entropy": entropy_loss.item()
+                },
+                "ppo/metrics": {
+                    "kl": approx_kl,
+                    "clip_fraction": clip_fraction
+                }
+            }, step=self.global_step)
 
         return approx_kl, clip_fraction
 
@@ -605,3 +637,25 @@ class Trainer:
         """
         return obs["players"][:, 0, 0].long()
     
+
+    def _log_system_metrics(self):
+        """Log system metrics to WandB."""
+        if not (self.wandb):
+            return
+        
+        metrics = {
+            "system/memory_used": psutil.Process().memory_info().rss / (1024 * 1024),  # MB
+            "system/cpu_percent": psutil.cpu_percent(),
+            "system/steps_per_second": int(self.global_step / (time.time() - self.start_time))
+        }
+        
+        # Add GPU metrics if available
+        if torch.cuda.is_available():
+            metrics.update({
+                "system/gpu_utilization": torch.cuda.utilization(),
+                "system/gpu_memory_allocated": torch.cuda.memory_allocated() / (1024 * 1024),  # MB
+                "system/gpu_memory_reserved": torch.cuda.memory_reserved() / (1024 * 1024)  # MB
+            })
+        
+        wandb.log(metrics, step=self.global_step)
+

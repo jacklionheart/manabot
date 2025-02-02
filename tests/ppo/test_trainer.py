@@ -39,7 +39,12 @@ import logging
 import pytest
 import numpy as np
 import torch
-
+from contextlib import contextmanager
+from typing import Generator
+import os
+import shutil
+import tempfile
+from pathlib import Path
 from manabot.env import VectorEnv, Match, ObservationSpace, Reward
 from manabot.ppo import Agent, Trainer
 from manabot.infra import (
@@ -47,23 +52,53 @@ from manabot.infra import (
     TrainHypers,
     AgentHypers,
     ObservationSpaceHypers,
-    RewardHypers
+    RewardHypers,
+    ExperimentHypers
 )
 
 # Configure logging for tests
 logging.basicConfig(level=logging.INFO)
 
-
 # -----------------------------------------------------------------------------
 # Fixtures
 # -----------------------------------------------------------------------------
 
+@contextmanager
+def temp_run_dir() -> Generator[str, None, None]:
+    """Create a temporary directory for test runs.
+    
+    Usage:
+        with temp_run_dir() as run_dir:
+            # run_dir will be used for tensorboard/wandb artifacts
+            # directory is automatically cleaned up after the test
+    """
+    original_runs = os.environ.get('MANABOT_RUNS_DIR')
+    temp_dir = tempfile.mkdtemp(prefix='manabot_test_')
+    os.environ['MANABOT_RUNS_DIR'] = temp_dir
+    try:
+        yield temp_dir
+    finally:
+        if original_runs:
+            os.environ['MANABOT_RUNS_DIR'] = original_runs
+        else:   
+            os.environ.pop('MANABOT_RUNS_DIR', None)
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+@pytest.fixture
+def run_dir() -> Generator[str, None, None]:
+    """Pytest fixture that provides a temporary run directory.
+    
+    Usage:
+        def test_something(run_dir):
+            # run_dir points to temporary directory
+            # directory is automatically cleaned up after the test
+    """
+    with temp_run_dir() as d:
+        yield d
+
 @pytest.fixture
 def observation_space():
-    """
-    Creates a minimal ObservationSpace for testing, with small shapes 
-    for global, players, cards, permanents, and actions.
-    """
+    """Creates a minimal ObservationSpace for testing."""
     return ObservationSpace(
         ObservationSpaceHypers(
             max_cards=3,
@@ -74,16 +109,19 @@ def observation_space():
     )
 
 @pytest.fixture
-def experiment():
+def experiment(run_dir):  # Add run_dir dependency here
     """Creates an Experiment instance for testing."""
-    return Experiment()
+    return Experiment(ExperimentHypers(
+        exp_name="test_run",
+        seed=42,
+        wandb=False,
+        tensorboard=True,
+        runs_dir=Path(run_dir)
+    ))
 
 @pytest.fixture
 def vector_env(observation_space):
-    """
-    Creates a VectorEnv instance with a small number of environments (2).
-    Uses a trivial reward for consistent testing.
-    """
+    """Creates a VectorEnv instance with a small number of environments."""
     return VectorEnv(
         2,
         Match(),
@@ -93,9 +131,7 @@ def vector_env(observation_space):
 
 @pytest.fixture
 def agent(observation_space):
-    """
-    Creates an Agent with minimal configuration (no dropout) for deterministic tests.
-    """
+    """Creates an Agent with minimal configuration for deterministic tests."""
     a_hypers = AgentHypers(
         game_embedding_dim=8,
         battlefield_embedding_dim=8,
@@ -106,18 +142,20 @@ def agent(observation_space):
 
 @pytest.fixture
 def trainer(agent, experiment, vector_env):
-    """
-    Creates a Trainer instance with minimal configuration. 
-    If you want to tweak steps or minibatches, do it here.
-    """
+    """Creates a Trainer instance with minimal configuration."""
     t_hypers = TrainHypers(
         num_envs=2,
         num_steps=2000,
         num_minibatches=4,
-        total_timesteps=50_000  # Just an example
+        total_timesteps=50_000
     )
-    return Trainer(agent, experiment, vector_env, t_hypers)
-
+    trainer = Trainer(agent, experiment, vector_env, t_hypers)
+    yield trainer
+    # Cleanup
+    if trainer:
+        trainer.experiment.close()
+    if hasattr(trainer, 'env'):
+        trainer.env.close()
 
 # -----------------------------------------------------------------------------
 # Helper Functions
@@ -207,7 +245,7 @@ class TestRolloutAndBuffer:
         assert torch.all((new_actor_ids >= 0) & (new_actor_ids < 2)), "Invalid actor IDs"
 
         # Check buffer storage capacity
-        for pid, buffer in trainer.multi_buffer.buffers.items():
+        for _, buffer in trainer.multi_buffer.buffers.items():
             if buffer.step_idx > 0:
                 assert buffer.step_idx <= trainer.hypers.num_steps
                 # Verify dimension

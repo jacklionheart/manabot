@@ -2,70 +2,50 @@
 """
 train.py
 Entry point for a quick training run of ManaBot using PPO.
-This script sets up the experiment, environment, agent, and trainer using the Hydra configuration,
-overriding the training hyperparameters to use a small (CPU) quick-run setup.
-
-Quick Training Config:
-    - num_envs: 4
-    - num_steps: 128
-    - total_timesteps: 100000
-    - batch_size: 512
-    - learning_rate: 2.5e-4
-
-This script uses the Trainer object directly (without subclassing).
 """
 
 import hydra
-from omegaconf import OmegaConf
-from manabot.infra import Experiment, Hypers
-from manabot.env.observation import ObservationSpace
-from manabot.env.env import VectorEnv  # Note: VectorEnv is defined in manabot/env/env.py
-from manabot.env.match import Match
-from manabot.env.reward import Reward
-from manabot.ppo.agent import Agent
-from manabot.ppo.trainer import Trainer
+from omegaconf import DictConfig, OmegaConf
+from manabot.infra import Experiment, Hypers, MatchHypers
+from manabot.env import ObservationSpace, VectorEnv, Match, Reward
+from manabot.ppo import Agent, Trainer
+import manabot.infra.hypers
 
+manabot.infra.hypers.initialize()
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
-def main(cfg: Hypers) -> None:
-    # --- Quick Training Configuration Overrides ---
-    quick_train_config = {
-        'num_envs': 4,        # Small enough for CPU
-        'num_steps': 128,     # Standard PPO window
-        'total_timesteps': 100000,  # ~1hr on MacBook
-        'batch_size': 512,
-        'learning_rate': 2.5e-4
-    }
-    cfg.train.num_envs = quick_train_config['num_envs']
-    cfg.train.num_steps = quick_train_config['num_steps']
-    cfg.train.total_timesteps = quick_train_config['total_timesteps']
-    cfg.train.learning_rate = quick_train_config['learning_rate']
+def main(cfg: DictConfig) -> None:
+    # Convert each config group to a proper Python object.
+    # (If needed, these will be proper dataclass instances.)
+    obs_config = OmegaConf.to_object(cfg.observation)
+    train_config = OmegaConf.to_object(cfg.train)
+    reward_config = OmegaConf.to_object(cfg.reward)
+    agent_config = OmegaConf.to_object(cfg.agent)
+    experiment_config = OmegaConf.to_object(cfg.experiment)
+    match_config = OmegaConf.to_object(cfg.match)
+    # Create the top-level hypers instance, now with match as a dataclass.
+    hypers = Hypers(
+        observation=obs_config,
+        match=match_config,
+        train=train_config,
+        reward=reward_config,
+        agent=agent_config,
+        experiment=experiment_config
+    )
     
-    # --- Experiment Setup ---
-    experiment = Experiment(cfg.experiment)
-    run_name, writer = experiment.setup()
-    print(f"Starting training run: {run_name}")
+    # Setup components
+    experiment = Experiment(hypers.experiment, hypers)
+    observation_space = ObservationSpace(hypers.observation)
+    match = Match(hypers.match)
+    reward = Reward(hypers.reward)
     
-    # --- Create Environment Components ---
-    # Observation space from config (uses ObservationSpaceHypers)
-    observation_space = ObservationSpace(cfg.observation)
-    # Create the match configuration (the Match object accepts a MatchHypers)
-    match = Match(cfg.match)
-    # Create the reward computation object
-    reward = Reward(cfg.reward)
+    # Create environment and agent
+    env = VectorEnv(hypers.train.num_envs, match, observation_space, reward, device=experiment.device)
+    agent = Agent(observation_space, hypers.agent)
     
-    # --- Create Vectorized Environment ---
-    env = VectorEnv(cfg.train.num_envs, match, observation_space, reward, device=experiment.device)
-    
-    # --- Create Agent ---
-    agent = Agent(observation_space, cfg.agent)
-    
-    # --- Create Trainer ---
-    trainer = Trainer(agent, experiment, env, cfg.train)
-        
-    # --- Start Training ---
+    # Train
+    trainer = Trainer(agent, experiment, env, hypers.train)
     trainer.train()
-
 
 if __name__ == "__main__":
     main()

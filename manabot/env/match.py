@@ -4,14 +4,13 @@ Defines configuration for a Magic: The Gathering match between two players.
 """
 
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, Any
 import json
-import argparse
 
 import managym
 
-from manabot.infra.hypers import MatchHypers
+from manabot.infra.hypers import MatchHypers, RewardHypers
 
 @dataclass
 class Match:
@@ -69,3 +68,36 @@ def parse_deck(deck_str: str) -> Dict[str, int]:
             card, count = pair.split(':')
             deck[card.strip()] = int(count)
         return deck
+
+class Reward:
+    """
+    Reward policy for an environment.
+
+    Hypers:
+        managym: If true, directly use the reward from the C++ managym environment.
+        trivial: If True, return 1.0 for all rewards.
+        win_reward: Reward for winning the game.
+        lose_reward: Reward for losing the game.
+    """
+    def __init__(self, hypers: RewardHypers):
+        self.hypers = hypers
+
+    def compute(self, cpp_reward : int, last_obs : managym.Observation, new_obs : managym.Observation) -> float:
+        if self.hypers.managym:
+            return cpp_reward   
+
+        if self.hypers.trivial:
+            return 1.0
+
+        else:
+            if new_obs.game_over:
+                agent = last_obs.players[0].player_index
+                # The "agent" should not change when the game is over
+                assert agent == new_obs.players[0].player_index
+                
+                if new_obs.won == agent:
+                    return self.hypers.win_reward
+                else:
+                    return self.hypers.lose_reward
+            else:
+                return cpp_reward 
