@@ -8,4 +8,9 @@
     "files.autoSave": "afterDelay",
     "python.analysis.typeCheckingMode": "standard",
     "explorer.excludeGitIgnore": true,
+    "files.exclude": {
+        "build/": true,
+        "__pycache__/": true,
+        ".cache": true
+    }
 }

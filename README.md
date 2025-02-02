@@ -7,12 +7,11 @@ A reinforcement learning framework for [Magic: The Gathering](https://magic.wiza
 ManaBot is organized into three main components with strict dependency ordering:
 
 1. **`manabot.data`**  
-   - Provides data structures and utilities for representing game state and actions.  
    - Depends only on `managym`.  
 
 2. **`manabot.env`**  
    - Implements a gymnasium-like API around managym.  
-   - Depends on `managym` and `manabot.data`.  
+   - Depends on `managym`  
 
 3. **`manabot.ppo`**  
    - Contains model architecture and training code.  
@@ -66,7 +65,7 @@ from typing import Dict, List
 from import torch import Tensor
 
 # manabot imports
-from manabot.data import Observation
+from manabot.env import ObservationSpace
 
 # Local imports
 from .sibling import Thing

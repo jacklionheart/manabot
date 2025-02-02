@@ -1,24 +1,16 @@
 """
 observation.py
-Defines a Gymnasium-compatible observation space from managym observations.
+Defines a Gymnasium-compatible observation space from managym observations
+called `ObservationSpace`.
 """
 
 from enum import IntEnum
 from typing import Dict
 import numpy as np
-from gymnasium import spaces
+import gymnasium as gym
 import managym
-
-# -----------------------------------------------------------------------------
-# Value Limits (still available if you need them, but no longer enforced in spaces)
-# -----------------------------------------------------------------------------
-MAX_LIFE = 100
-MAX_TURNS = 1000
-MAX_ZONE_SIZE = 1000
-MAX_DAMAGE = 100
-MAX_MANA = 20
-MAX_POWER = 20
-
+from manabot.infra.hypers import ObservationSpaceHypers
+from typing import KeysView, ValuesView, ItemsView
 # -----------------------------------------------------------------------------
 # Game Enums - mirror managym for validation
 # -----------------------------------------------------------------------------
@@ -68,32 +60,35 @@ class ZoneEnum(IntEnum):
 # -----------------------------------------------------------------------------
 
 class ObservationEncoder:
-    """Converts managym observations to tensors."""
+    """Converts managym observations to tensors.
+        Hypers:
+        - max_cards: Slots for known cards across all zones.
+        - max_permanents: Slots for permanents. Permanents are separate objects from their underlying cards.
+        - max_actions: Slots for actions in the action space. Actionspace will have this many actions.
+        - max_focus_objects: Slots for game objects in referred to by actions.
+    """
     def __init__(
         self,
-        num_players: int = 2,
-        max_cards: int = 100,
-        max_permanents: int = 50,
-        max_actions: int = 20,
-        max_focus_objects: int = 2,
+        hypers: ObservationSpaceHypers,
     ):
-        self.num_players = num_players
-        self.max_cards = max_cards
-        self.max_permanents = max_permanents
-        self.max_actions = max_actions
-        self.max_focus_objects = max_focus_objects
+        self.hypers = hypers
+        self.num_players = 2
+        self.max_cards = hypers.max_cards
+        self.max_permanents = hypers.max_permanents
+        self.max_actions = hypers.max_actions
+        self.max_focus_objects = hypers.max_focus_objects
 
-        self.num_phases = len(PhaseEnum)
-        self.num_steps = len(StepEnum)
-        self.num_zones = len(ZoneEnum)
-        self.num_actions = len(ActionEnum)
+        self.num_phases = len(PhaseEnum.__members__)
+        self.num_steps = len(StepEnum.__members__)
+        self.num_zones = len(ZoneEnum.__members__)
+        self.num_actions = len(ActionEnum.__members__)
 
         # Feature dimensions
-        self.player_dim = 1 + 2 + self.num_zones  # life + is_active + is_agent + zone_counts
+        self.player_dim = 5 + self.num_zones  # index + id + life + is_active + is_agent + zone_counts
         self.card_dim = self.num_zones + 1 + 2 + 1 + 6  # zone + owner + power/tough + mana + 6 type flags
-        self.permanent_dim = 6  # controller, tapped, damage, summoning_sick, is_land, is_creature
+        self.permanent_dim = 4  # controller, tapped, damage, summoning_sick
         self.focus_dim = self.player_dim + self.card_dim + self.permanent_dim
-        self.action_dim = self.num_actions + (max_focus_objects * self.focus_dim)
+        self.action_dim = self.num_actions + (self.max_focus_objects * self.focus_dim) + 1 
 
     @property
     def shapes(self) -> Dict[str, tuple]:
@@ -153,7 +148,10 @@ class ObservationEncoder:
     def _encode_player_features(self, player: managym.Player) -> np.ndarray:
         arr = np.zeros(self.player_dim, dtype=np.float32)
         i = 0
-
+        arr[i] = float(player.player_index)
+        i += 1
+        arr[i] = float(player.id)
+        i += 1
         arr[i] = float(player.life)
         i += 1
         arr[i] = float(player.is_active)
@@ -220,10 +218,6 @@ class ObservationEncoder:
         arr[i] = float(perm.damage)
         i += 1
         arr[i] = float(perm.is_summoning_sick)
-        i += 1
-        arr[i] = float(perm.is_land)
-        i += 1
-        arr[i] = float(perm.is_creature)
         return arr
 
     def encode_focus_object(self, obs: managym.Observation, obj_id: int) -> np.ndarray:
@@ -236,11 +230,13 @@ class ObservationEncoder:
         # If it's a player
         if obj_id in obs.players:
             p = obs.players[obj_id]
-            arr[0] = float(p.life)
-            arr[1] = float(p.is_active)
-            arr[2] = float(p.is_agent)
+            arr[0] = float(p.player_index)
+            arr[1] = float(p.id)
+            arr[2] = float(p.life)
+            arr[3] = float(p.is_active)
+            arr[4] = float(p.is_agent)
             for z in range(min(len(p.zone_counts), self.num_zones)):
-                arr[3 + z] = float(p.zone_counts[z])
+                arr[5 + z] = float(p.zone_counts[z])
             return arr
 
         # If it's a card
@@ -272,8 +268,6 @@ class ObservationEncoder:
             arr[offset + 1] = float(pm.tapped)
             arr[offset + 2] = float(pm.damage)
             arr[offset + 3] = float(pm.is_summoning_sick)
-            arr[offset + 4] = float(pm.is_land)
-            arr[offset + 5] = float(pm.is_creature)
             return arr
 
         # If no match, return zero
@@ -282,76 +276,131 @@ class ObservationEncoder:
     def _encode_actions(self, obs: managym.Observation) -> np.ndarray:
         arr = np.zeros(self.shapes['actions'], dtype=np.float32)
         
+        # Create boolean mask of valid actions directly as bool
+        valid_actions = np.zeros(self.max_actions, dtype=bool)
         for idx, action in enumerate(obs.action_space.actions[:self.max_actions]):
             if idx >= self.max_actions:
                 break
+            valid_actions[idx] = True
             arr[idx] = self._encode_action(obs, action)
+        
+        # Set validity bit
+        arr[..., -1] = valid_actions
         return arr
-    
+
     def _encode_action(self, obs: managym.Observation, action: managym.Action) -> np.ndarray:
+        # Get dimensions for this action's encoding
+        action_feature_dim = self.action_dim - 1  # -1 for validity bit
         arr = np.zeros(self.action_dim, dtype=np.float32)
         
+        # Encode action type
         action_type = int(action.action_type)
         if 0 <= action_type < self.num_actions:
             arr[action_type] = 1.0
             
+        # Encode focus objects
         for f_idx, focus_id in enumerate(action.focus[:self.max_focus_objects]):
             offset = self.num_actions + (f_idx * self.focus_dim)
             arr[offset:offset + self.focus_dim] = self.encode_focus_object(obs, focus_id)
+        
+        # Note: arr[-1] will be set by _encode_actions 
         return arr
+    
 
+class ObservationSpace(gym.spaces.Space):
+    """
+    Input space for the agent.
+    Gymnasium-compatible observation space.
+    Subspaces:
+        - global: Game state, e.g. turn number, phase, step, game over, won
+        - players: Player features, e.g. life, is_active, is_agent, zone counts
+        - cards: Card features, e.g. zone, owner, power, toughness, mana, type flags
+        - permanents: Permanent features, e.g. controller, tapped, damage, summoning sick, is_land, is_creature
+        - actions: Action features, e.g. action type, focus objects
+    """
+    spaces: gym.spaces.Dict
 
-class ObservationSpace(spaces.Space):
-    def __init__(self, encoder: ObservationEncoder | None = None):
+    def __init__(self, hypers: ObservationSpaceHypers = ObservationSpaceHypers()):
         super().__init__(shape=None, dtype=None)
-        if encoder is None:
-            encoder = ObservationEncoder()
-        self.encoder = encoder
+        self.encoder = ObservationEncoder(hypers)
         
         # Instead of bounding these arrays, we let them be unbounded. 
         # This ensures .contains(...) won't fail on large numeric values.
-        self.space = spaces.Dict({
-            'global': spaces.Box(
+        self.spaces = gym.spaces.Dict({
+            'global': gym.spaces.Box(
                 low=-np.inf,
                 high=np.inf,
-                shape=encoder.shapes['global'],
+                shape=self.encoder.shapes['global'],
                 dtype=np.float32
             ),
-            'players': spaces.Box(
+            'players': gym.spaces.Box(
                 low=-np.inf,
                 high=np.inf,
-                shape=encoder.shapes['players'],
+                shape=self.encoder.shapes['players'],
                 dtype=np.float32
             ),
-            'cards': spaces.Box(
+            'cards': gym.spaces.Box(
                 low=-np.inf,
                 high=np.inf,
-                shape=encoder.shapes['cards'],
+                shape=self.encoder.shapes['cards'],
                 dtype=np.float32
             ),
-            'permanents': spaces.Box(
+            'permanents': gym.spaces.Box(
                 low=-np.inf,
                 high=np.inf,
-                shape=encoder.shapes['permanents'],
+                shape=self.encoder.shapes['permanents'],
                 dtype=np.float32
             ),
-            'actions': spaces.Box(
+            'actions': gym.spaces.Box(
                 low=-np.inf,
                 high=np.inf,
-                shape=encoder.shapes['actions'],
+                shape=self.encoder.shapes['actions'],
                 dtype=np.float32
             )
         })
 
+        self.shapes = self.encoder.shapes
+
     def sample(self, mask=None) -> dict:
         """Samples from each sub-space. (Random values in [-∞, ∞] is not well-defined, 
            so in practice this might generate NaNs. But it satisfies the 'no bound' approach.)"""
-        return self.space.sample(mask)
+        return self.spaces.sample(mask)
 
     def contains(self, x: Dict[str, np.ndarray]) -> bool:
         """True if x fits the shape of each sub-space. We have no numeric bounds to check."""
-        return self.space.contains(x)
+        return self.spaces.contains(x)
+
+    def encode(self, obs: managym.Observation) -> dict:
+        return self.encoder.encode(obs)
 
     @property
     def shape(self) -> tuple | None:
-        return self.space.shape
+        return None
+
+    def __getitem__(self, key: str) -> gym.spaces.Space:
+        return self.spaces[key]
+    
+    def keys(self) -> KeysView:
+        return self.spaces.keys()
+
+    def values(self) -> ValuesView:
+        return self.spaces.values()
+
+    def items(self) -> ItemsView:
+        return self.spaces.items()
+
+    def __eq__(self, other: object) -> bool:
+        """Check if two observation spaces are equivalent."""
+        if not isinstance(other, ObservationSpace):
+            return False
+        
+        # Check that both spaces have the same sub-spaces with same properties
+        if set(self.spaces.keys()) != set(other.spaces.keys()):
+            return False
+            
+        # Check each subspace
+        for key in self.spaces:
+            if self.spaces[key] != other.spaces[key]:
+                return False
+                
+        return True

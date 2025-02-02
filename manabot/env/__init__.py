@@ -1,5 +1,6 @@
-from .env import Env
-from .vector_env import VectorEnv
-from .config import PlayerConfig
+from .env import Env, VectorEnv
+from .match import Match
+from .reward import Reward
+from .observation import ObservationSpace
 
-__all__ = ['Env', 'VectorEnv', 'PlayerConfig']
+__all__ = ['Env', 'Match', 'VectorEnv', 'Reward', 'ObservationSpace']
