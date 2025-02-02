@@ -1,6 +1,58 @@
-# ManaBot
+# manabot
 
 A reinforcement learning framework for [Magic: The Gathering](https://magic.wizards.com/), built on top of [managym](https://github.com/jacklionheart/managym).
+
+manabot currently uses PPO with a MLP backing a shared value/policy network.
+
+### Training
+
+```bash
+# Clone the repo
+git clone https://github.com/jacklionheart/manabot.git
+cd manabot
+# Install the package
+pip install -e .
+# Run the training script
+python manabot/scripts/train.py
+```
+
+Edit `manabot/scripts/conf/config.yaml` to configure the experiment.
+
+To see in tensorboard, run: (assumes `quick_train` is the experiment name in `config.yaml`)
+```bash
+tensorboard tensorboard --logdir ~/manabot-runs/quick_train
+```
+
+Current status: training runs without error, but loss is not decreasing. Still very early
+
+### Inference
+
+TBD
+
+### Testing
+
+```bash
+pytest tests/
+```
+
+### Architecture
+
+manabot is organized into four three components:
+
+1. **`manabot.env`**: 
+   - `VectorEnv`: gymnasium.AsyncVectorEnv-based interface around managym
+   - `ObservationSpace`: dataclass describing the observation space
+   - `Match`: dataclass describing the game of magic to be played (decklists, etc.)
+   - `Reward`: dataclass describing the reward function
+
+2. **`manabot.ppo`**: PPO implementation  
+   - `Agent`: Shared Value/Policy network
+   - `Trainer`: PPO trainer for learning network weights
+
+3. **`manabot.infra`**: Training infrastructure
+   - `Experiment`: Experiment tracking with wandb/tensorboard
+   - `Hypers`: Hydra-compatible hyperparameter management and configuration
+
 
 ## Architecture
 
@@ -20,26 +72,12 @@ ManaBot is organized into three main components with strict dependency ordering:
 ### Design Decisions
 
 - **managym vs. manabot Split**  
-  - **managym** (C++): Handles low-level game logic.  
-  - **manabot** (Python): Focuses on data handling, environment bridging, and RL methods.
+  - **managym** (C++): Handles low-level game logic. Eventually: add native-Cpp inference for faster rollouts
+  - **manabot** (Python): Torch-backed optimization, and, for now, inference for rollouts.
 
 - **Dynamic Discrete Action Space**  
   - Limited number of action slots whose meaning can vary significantly from step to step.  
   - The “meaning” of each action slot is included in the observation tensor for context.
-
-## Installation
-
-```bash
-git clone https://github.com/jacklionheart/manabot.git
-cd manabot
-pip install -e .
-
-## Testing
-
-```zsh
-pip install -e .
-pytest tests/
-```
 
 ## Style Guide
 

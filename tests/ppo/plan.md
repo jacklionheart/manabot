@@ -193,9 +193,3 @@ if self.track:
 3. Basic behavioral metrics
 4. Policy comparison tool
 5. Extended logging/analysis
-
-Next Steps:
-1. Implement core test suite
-2. Create quick training script
-3. Add basic behavioral metrics
-4. Build comparison tool as training progresses
