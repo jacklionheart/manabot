@@ -105,6 +105,12 @@ class Env(gym.Env):
     def close(self):
         pass
 
+    @property
+    def last_cpp_obs(self):
+        return self._last_obs
+
+
+
 class VectorEnv:
     """
     Vector environment that automatically batches observations from multiple environments

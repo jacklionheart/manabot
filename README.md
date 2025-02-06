@@ -139,6 +139,7 @@ When working with this codebase, LLMs should:
 ## Future Roadmap
 
 Long-term goals and exploration areas:
+- Model behavioral analysis: ELO, etc.
 - Attentional model architecture
 - Unknown information estimation  
 - Performance: C++ side inference

@@ -101,8 +101,8 @@ def observation_space():
     """Creates a minimal ObservationSpace for testing."""
     return ObservationSpace(
         ObservationSpaceHypers(
-            max_cards=3,
-            max_permanents=2,
+            max_cards_per_player=3,
+            max_permanents_per_player=2,
             max_actions=5,
             max_focus_objects=2
         )
