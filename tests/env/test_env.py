@@ -168,7 +168,7 @@ class TestEnvironment:
         Test that agent indices match between observation encoding and managym.
         This test uses a regular (non-vectorized) Env, but converts its observations
         to a batched format (adding a singular environment dimension) before using
-        get_agent_indices.
+    get_agent_indices.
         """
         # Reset the regular Env (non-vectorized).
         obs, info = env.reset()
@@ -180,12 +180,10 @@ class TestEnvironment:
         steps = 0
         turn_counts = {}
         
-        
         while steps < max_steps:
             # Extract agent indices using the vectorized observation.
-            actor_indices = manabot.env.observation.get_agent_indices(obs_vec)
-            actor_idx = actor_indices[0]  # Only one env now
-            
+            actor_idx = manabot.env.observation.get_agent_indices(obs_vec)
+
             raw_obs = env.last_cpp_obs
             cpp_player_idx = raw_obs.agent.player_index
             
@@ -196,14 +194,14 @@ class TestEnvironment:
             # Record the turn count.
             turn_counts[actor_idx] = turn_counts.get(actor_idx, 0) + 1
             
-            # Take a step in the environment (using a dummy action, e.g., 0).
+            # Take a step in the environment
             obs, reward, done, truncated, info = env.step(0)
             
             # Re-wrap the new observation.
             obs_vec = {k: np.expand_dims(v, axis=0) for k, v in obs.items()}
             steps += 1
             
-            # Check termination for the first env.
+            # Check termination
             if done or truncated:
                 break
 
@@ -211,6 +209,5 @@ class TestEnvironment:
         assert len(turn_counts) >= 2, (
             f"Expected at least 2 different agent indices, got {turn_counts}"
         )
-
 if __name__ == "__main__":
     pytest.main([__file__])

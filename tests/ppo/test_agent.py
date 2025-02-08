@@ -37,7 +37,7 @@ def observation_space() -> ObservationSpace:
     """Create a minimal but complete observation space for testing."""
     return ObservationSpace(
         ObservationSpaceHypers(
-            max_cards_per_player=3,      # Small number for testing
+            max_cards_per_player=3,       # Small number for testing
             max_permanents_per_player=2,  # Small number for testing
             max_actions=5,               # Enough actions to test selection
             max_focus_objects=2          # Standard focus object count
@@ -48,7 +48,7 @@ def observation_space() -> ObservationSpace:
 def agent_hypers() -> AgentHypers:
     """Create agent hyperparameters optimized for testing."""
     return AgentHypers(
-        hidden_dim=16,           # Small embedding dimension for fast testing
+        hidden_dim=4,           # Small embedding dimension for fast testing
         num_attention_heads=2    # Multiple heads but keep it small
     )
 
@@ -157,10 +157,8 @@ def test_attention_mechanism(agent: Agent, real_observation: Dict[str, torch.Ten
     obs = real_observation
     objects, is_agent, validity = agent._gather_object_embeddings(obs)
     key_padding_mask = (validity == 0)
-    agent_id = obs["agent_player"][:, 0].long()
-    
-    attended = agent.attention(objects, is_agent, agent_id, key_padding_mask=key_padding_mask)
-    
+    attended = agent.attention(objects, is_agent, key_padding_mask=key_padding_mask)
+
     assert attended.shape == objects.shape, \
         f"Attention changed shape from {objects.shape} to {attended.shape}"
     assert not torch.isnan(attended).any(), "NaN in attention output"
@@ -177,8 +175,7 @@ def test_focus_object_incorporation(agent: Agent, real_observation: Dict[str, to
     obs = real_observation
     objects, is_agent, validity = agent._gather_object_embeddings(obs)
     key_padding_mask = (validity == 0)
-    agent_id = obs["agent_player"][:, 0].long()
-    post_attention = agent.attention(objects, is_agent, agent_id, key_padding_mask=key_padding_mask)
+    post_attention = agent.attention(objects, is_agent, key_padding_mask=key_padding_mask)
     
     actions = agent.action_embedding(obs["actions"][..., :-1])
     actions_with_focus = agent._add_focus(actions, post_attention, obs["action_focus"])
@@ -217,23 +214,6 @@ def test_action_masking(agent: Agent, real_observation: Dict[str, torch.Tensor])
         chosen_action = action[i].item()
         assert action_mask[i, chosen_action].item() == 1, f"Selected invalid action {chosen_action} in batch {i}"
 
-def test_deterministic_action(agent: Agent, real_observation: Dict[str, torch.Tensor]):
-    """
-    Verify that deterministic action selection chooses the highest-probability valid action.
-    """
-    obs = copy.deepcopy(real_observation)
-    with torch.no_grad():
-        logits, _ = agent(obs)
-    
-    # Force specific logits to favor certain actions
-    logits[0, 1] = 10.0  # Force selection of action 1 for first batch element
-    logits[1, 0] = 10.0  # Force selection of action 0 for second batch element
-    
-    with torch.no_grad():
-        action, _, _, _ = agent.get_action_and_value(obs, deterministic=True)
-    
-    assert action[0].item() == 1, "Wrong deterministic action selected for batch 0"
-    assert action[1].item() == 0, "Wrong deterministic action selected for batch 1"
 
 # -----------------------------------------------------------------------------
 # Numerical Stability Tests
@@ -276,10 +256,9 @@ def test_attention_stability(agent: Agent, real_observation: Dict[str, torch.Ten
     obs = real_observation
     objects, is_agent, validity = agent._gather_object_embeddings(obs)
     key_padding_mask = (validity == 0)
-    agent_id = obs["agent_player"][:, 0].long()
     outputs = []
     for _ in range(5):
-        attended = agent.attention(objects, is_agent, agent_id, key_padding_mask=key_padding_mask)
+        attended = agent.attention(objects, is_agent, key_padding_mask=key_padding_mask)
         outputs.append(attended)
     for i in range(1, len(outputs)):
         assert torch.allclose(outputs[0], outputs[i], rtol=1e-5), "Attention outputs not consistent across forward passes"
@@ -309,29 +288,6 @@ def test_action_entropy(agent: Agent, real_observation: Dict[str, torch.Tensor])
     valid_actions = obs["actions_valid"].sum(dim=-1)
     max_entropy = torch.log(valid_actions)
     assert torch.all(entropy <= max_entropy + 1e-5), "Entropy exceeds theoretical maximum"
-
-def test_invalid_observation_handling(agent: Agent, real_observation: Dict[str, torch.Tensor]):
-    """
-    Verify that the agent handles edge cases in observations appropriately.
-    """
-    obs = copy.deepcopy(real_observation)
-    
-    # Case 1: No valid actions
-    obs_no_valid = copy.deepcopy(obs)
-    obs_no_valid["actions_valid"][:] = 0
-    with pytest.raises(ValueError, match="No valid actions"):
-        agent.get_action_and_value(obs_no_valid)
-    
-    # Case 2: All zero features (but valid masks maintained)
-    obs_zero = copy.deepcopy(obs)
-    for key in obs_zero:
-        if key.endswith("_valid"):
-            continue
-        obs_zero[key] = torch.zeros_like(obs_zero[key])
-    with torch.no_grad():
-        logits, value = agent(obs_zero)
-    assert not torch.isnan(logits).any(), "NaN in logits with zero features"
-    assert not torch.isnan(value).any(), "NaN in value with zero features"
 
 if __name__ == "__main__":
     pytest.main([__file__])

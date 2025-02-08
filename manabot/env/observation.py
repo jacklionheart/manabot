@@ -16,8 +16,7 @@ Additional updates in this version:
 """
 
 from enum import IntEnum
-import logging
-from typing import Dict, List, Tuple, KeysView, ValuesView, ItemsView, Optional
+from typing import Dict, Tuple, KeysView, ValuesView, ItemsView, Union
 import numpy as np  
 import gymnasium as gym
 import torch
@@ -25,7 +24,8 @@ import managym
 
 from manabot.infra.hypers import ObservationSpaceHypers
 
-logger = logging.getLogger("manabot.env.observation")   
+from manabot.infra import getLogger
+logger = getLogger(__name__)
 
 # -----------------------------------------------------------------------------
 # Game Enums - mirror managym for validation
@@ -112,30 +112,26 @@ class ObservationEncoder:
     @property
     def shapes(self) -> Dict[str, Tuple[int, ...]]:
         return {
-            "agent_player": (self.player_dim,),
-            "agent_player_id": (1,),
-            "opponent_player": (self.player_dim,),
-            "opponent_player_id": (1,),
+            # Game objects - change player shapes to include the batch dimension
+            "agent_player": (1, self.player_dim),          # Changed from (self.player_dim,)
+            "opponent_player": (1, self.player_dim),       # Changed from (self.player_dim,)
+            
+            # Rest stays the same
             "agent_cards": (self.cards_per_player, self.card_dim),
-            "agent_card_controllers": (self.cards_per_player,),
             "opponent_cards": (self.cards_per_player, self.card_dim),
-            "opponent_card_controllers": (self.cards_per_player,),
             "agent_permanents": (self.perms_per_player, self.permanent_dim),
-            "agent_permanent_controllers": (self.perms_per_player,),
             "opponent_permanents": (self.perms_per_player, self.permanent_dim),
-            "opponent_permanent_controllers": (self.perms_per_player,),
             "actions": (self.max_actions, self.action_dim),
-            "actions_valid": (self.max_actions,),
-            # Validity masks are now derived from the appended valid flags.
+            "action_focus": (self.max_actions, self.max_focus_objects),
             "agent_player_valid": (1,),
             "opponent_player_valid": (1,),
             "agent_cards_valid": (self.cards_per_player,),
             "opponent_cards_valid": (self.cards_per_player,),
             "agent_permanents_valid": (self.perms_per_player,),
             "opponent_permanents_valid": (self.perms_per_player,),
-            "action_focus": (self.max_actions, self.max_focus_objects),
+            "actions_valid": (self.max_actions,),
         }
-    
+        
     def encode(self, obs: managym.Observation) -> Dict[str, np.ndarray]:
         out = {}
 
@@ -151,31 +147,45 @@ class ObservationEncoder:
         # consistent and matches the actual array order, because
         # this is also the concatenation order.
 
+        log = logger.getChild("encode")
+
         self.object_to_index = {}
         self.current_object_index = 0
 
-        # For players, output a 2D array with one slot (shape: (1, player_dim))
+        # Game Objects
         out["agent_player"] = self._encode_player_features(obs.agent)[np.newaxis, ...]
-        out["agent_player_valid"] = np.ones((1,), dtype=np.float32)
-
         out["opponent_player"] = self._encode_player_features(obs.opponent)[np.newaxis, ...]
-        out["opponent_player_valid"] = np.ones((1,), dtype=np.float32)
-
         out["agent_cards"] = self._encode_cards(obs.agent_cards)
-        out["agent_cards_valid"] = out["agent_cards"][..., -1].astype(np.float32)
-
         out["opponent_cards"] = self._encode_cards(obs.opponent_cards)
-        out["opponent_cards_valid"] = out["opponent_cards"][..., -1].astype(np.float32)
-
         out["agent_permanents"] = self._encode_perms(obs.agent_permanents)
-        out["agent_permanents_valid"] = out["agent_permanents"][..., -1].astype(np.float32)
-
         out["opponent_permanents"] = self._encode_perms(obs.opponent_permanents)
+
+        # Validity masks    
+        out["agent_player_valid"] = np.ones((1,), dtype=np.float32)
+        out["opponent_player_valid"] = np.ones((1,), dtype=np.float32)
+        out["agent_cards_valid"] = out["agent_cards"][..., -1].astype(np.float32)
+        out["opponent_cards_valid"] = out["opponent_cards"][..., -1].astype(np.float32)
+        out["agent_permanents_valid"] = out["agent_permanents"][..., -1].astype(np.float32)
         out["opponent_permanents_valid"] = out["opponent_permanents"][..., -1].astype(np.float32)
 
+        # Actionspace   
         out["actions"], out["action_focus"] = self._encode_actions(obs)
         out["actions_valid"] = out["actions"][..., -1].astype(np.float32)
 
+        log.debug(f"agent_player: {out['agent_player'].shape}")
+        log.debug(f"agent_player_valid: {out['agent_player_valid'].shape}")
+        log.debug(f"opponent_player: {out['opponent_player'].shape}")
+        log.debug(f"opponent_player_valid: {out['opponent_player_valid'].shape}")
+        log.debug(f"agent_cards: {out['agent_cards'].shape}")
+        log.debug(f"agent_cards_valid: {out['agent_cards_valid'].shape}")
+        log.debug(f"opponent_cards: {out['opponent_cards'].shape}")
+        log.debug(f"opponent_cards_valid: {out['opponent_cards_valid'].shape}")
+        log.debug(f"agent_permanents: {out['agent_permanents'].shape}")
+        log.debug(f"agent_permanents_valid: {out['agent_permanents_valid'].shape}")
+        log.debug(f"opponent_permanents: {out['opponent_permanents'].shape}")
+        log.debug(f"opponent_permanents_valid: {out['opponent_permanents_valid'].shape}")
+        log.debug(f"actions: {out['actions'].shape}")
+        log.debug(f"action_focus: {out['action_focus'].shape}")
         return out
     # -------------------------------------------------------------------------
     # Players (with validity mask support)

@@ -14,7 +14,6 @@ Additional responsibilities:
 """
 
 import time
-import logging
 from typing import Dict, Tuple, List
 
 import numpy as np
@@ -27,46 +26,29 @@ from manabot.ppo.agent import Agent
 from manabot.infra.experiment import Experiment
 from manabot.infra.hypers import TrainHypers
 from manabot.env import ObservationSpace, VectorEnv
+from manabot.infra import getLogger
+logger = getLogger(__name__)
 import manabot.env.observation
-
-logger = logging.getLogger("manabot.ppo.trainer")
 
 # =============================================================================
 #  Internal Classes
 # =============================================================================
 
 class PPOBuffer:
-    """
-    Buffer to store transitions for one rollout (for one player).
-    Pre-allocated with fixed capacity (num_steps); if capacity is exceeded, a warning is logged.
-    """
-    def __init__(self, observation_space: ObservationSpace, num_steps: int, num_envs: int, device: str):
-        # Determine the shape for each observation sub-tensor.
-        shapes: List[Tuple[int, ...]] = []
-        for shape in observation_space.values():
-            if shape.shape is not None:
-                shapes.append(shape.shape)
-            else:
-                raise ValueError(f"Observation space {shape} has no shape")
-        
-        # Pre-allocate tensors for the entire rollout.
+    def __init__(self, observation_space: ObservationSpace, num_envs: int, device: str):
+        # Pre-allocate tensors for just the batch dimension
         self.obs = {
-            k: torch.zeros((num_steps, num_envs) + shapes[i],
-                           dtype=torch.float32, device=device)
-            for i, k in enumerate(observation_space.keys())
+            k: torch.zeros((num_envs,) + space.shape, dtype=torch.float32, device=device)
+            for k, space in observation_space.spaces.items()
         }
-        self.actions = torch.zeros((num_steps, num_envs), dtype=torch.int64, device=device)
-        self.logprobs = torch.zeros((num_steps, num_envs), dtype=torch.float32, device=device)
-        self.rewards = torch.zeros((num_steps, num_envs), dtype=torch.float32, device=device)
-        self.values = torch.zeros((num_steps, num_envs), dtype=torch.float32, device=device)
-        self.dones = torch.zeros((num_steps, num_envs), dtype=torch.bool, device=device)
-        self.advantages = None  # To be computed later
-        self.returns = None     # To be computed later
-
+        self.actions = torch.zeros(num_envs, dtype=torch.int64, device=device)
+        self.logprobs = torch.zeros(num_envs, dtype=torch.float32, device=device)
+        self.rewards = torch.zeros(num_envs, dtype=torch.float32, device=device)
+        self.values = torch.zeros(num_envs, dtype=torch.float32, device=device) 
+        self.dones = torch.zeros(num_envs, dtype=torch.bool, device=device)
+        
         self.device = device
-        self.num_steps = num_steps  # capacity per rollout
         self.num_envs = num_envs
-        self.step_idx = 0
 
     def store(self, obs: Dict[str, torch.Tensor],
                     action: torch.Tensor,
@@ -74,23 +56,16 @@ class PPOBuffer:
                     value: torch.Tensor,
                     logprob: torch.Tensor,
                     done: torch.Tensor) -> None:
-        """Store a transition. If capacity is exceeded, log a warning and skip."""
-        if self.step_idx >= self.num_steps:
-            logger.warning("PPOBuffer overflow: dropping transition.")
-            return
-
+        """Store a transition."""
         with torch.no_grad():
             for k, v in obs.items():
-                # Log shapes at first storage for debugging
-                if self.step_idx == 0:
-                    logger.debug(f"Storing obs key '{k}' with shape {v.shape}")
-                self.obs[k][self.step_idx] = v
-            self.actions[self.step_idx] = action
-            self.rewards[self.step_idx] = reward
-            self.values[self.step_idx] = value
-            self.logprobs[self.step_idx] = logprob
-            self.dones[self.step_idx] = done
-        self.step_idx += 1
+                self.obs[k] = v
+            self.actions = action
+            self.rewards = reward
+            self.values = value
+            self.logprobs = logprob
+            self.dones = done
+
 
     def compute_advantages(self, next_value: torch.Tensor, next_done: torch.Tensor,
                            gamma: float, gae_lambda: float) -> None:
@@ -148,7 +123,7 @@ class MultiAgentBuffer:
     def __init__(self, observation_space: ObservationSpace, num_steps: int, num_envs: int,
                  device: str, num_players: int = 2):
         self.buffers: Dict[int, PPOBuffer] = {
-            pid: PPOBuffer(observation_space, num_steps, num_envs, device)
+            pid: PPOBuffer(observation_space, num_envs, device)
             for pid in range(num_players)
         }
 
@@ -307,6 +282,8 @@ class Trainer:
             ############################################################
             # Rollout data collection
             ############################################################
+            logger.info("Starting rollout data collection.")
+            sef
             for step in range(hypers.num_steps):
                 try:
                     next_obs, next_done, prev_actor_ids = self._rollout_step(next_obs, prev_actor_ids)
@@ -389,6 +366,31 @@ class Trainer:
         self.agent.load_state_dict(checkpoint['agent_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         logger.info("Checkpoint loaded. Note: TrainHypers are not automatically restored.")
+
+    def _collect_rollout(self) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor]:
+        """
+        Collect num_steps of experience from environments.
+        Returns (final_obs, final_done, final_actor_ids)
+        """
+        next_obs = self.next_obs
+        next_done = self.next_done  
+        prev_actor_ids = self.prev_actor_ids
+
+        for step in range(self.hypers.num_steps):
+            try:
+                next_obs, next_done, prev_actor_ids = self._rollout_step(next_obs, prev_actor_ids)
+                self.consecutive_invalid_batches = 0
+            except Exception as e:
+                self.consecutive_invalid_batches += 1
+                logger.error(f"Rollout step error at step {step}: {e}")
+                if self.consecutive_invalid_batches >= self.invalid_batch_threshold:
+                    raise RuntimeError(f"Failure during rollout; halting training: {e}")
+                else:
+                    logger.error("Skipping faulty rollout step.")
+
+        return next_obs, next_done, prev_actor_ids
+
+
 
     def _rollout_step(self, next_obs: Dict[str, torch.Tensor], actor_ids: torch.Tensor) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor]:
         """
