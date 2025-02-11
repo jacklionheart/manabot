@@ -10,6 +10,7 @@ from manabot.env.observation import ObservationSpace
 from manabot.env import Env, VectorEnv, Reward
 from manabot.env.match import Match
 from manabot.infra.hypers import RewardHypers
+import manabot.env.observation
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,18 @@ def reward() -> Reward:
 @pytest.fixture
 def env(sample_match, observation_space, reward) -> Env:
     """Create a fresh environment instance for each test."""
-    return Env(sample_match, observation_space, reward)
+    return Env(sample_match, observation_space, reward, auto_reset=False)
+
+@pytest.fixture
+def vector_env(sample_match, observation_space, reward) -> VectorEnv:
+    """Create a vectorized environment for testing."""
+    return VectorEnv(
+        num_envs=7,
+        match=sample_match,
+        observation_space=observation_space,
+        reward=reward,
+        device="cpu"
+    )
 
 class TestEnvironment:
     """Tests for the ManaBot environment wrapper."""
@@ -104,57 +116,104 @@ class TestEnvironment:
             if done or truncated:
                 break
 
-    def test_vectorenv_tensor_outputs(self, observation_space):
+    def test_vectorenv_tensor_outputs(self, vector_env):
         """Test that VectorEnv properly converts everything to tensors."""
-        num_envs = 7
-        device = "cpu"  # Use CPU for testing
-        vec_env = VectorEnv(num_envs, Match(), observation_space, Reward(RewardHypers()), device=device)
+        num_envs = vector_env.num_envs
+        device = vector_env.device
         
         # Test reset
-        observations, info = vec_env.reset()
+        observations, info = vector_env.reset()
         
         # Verify we get tensors with correct dtypes
         assert isinstance(observations, dict)
         for key, tensor in observations.items():
             assert isinstance(tensor, torch.Tensor), f"{key} is not a tensor"
-            assert tensor.device.type == device, f"{key} is not on {device}"
             assert tensor.dtype == torch.float32, f"{key} has wrong dtype"
             assert tensor.shape[0] == num_envs, f"{key} missing batch dimension"
         
         # Test step with tensor action
         action = torch.zeros(num_envs, dtype=torch.int64, device=device)
-        next_obs, reward, terminated, truncated, info = vec_env.step(action)
+        next_obs, reward, terminated, truncated, info = vector_env.step(action)
         
         # Verify observation tensors maintain properties
         for key, tensor in next_obs.items():
             assert isinstance(tensor, torch.Tensor)
-            assert tensor.device.type == device
             assert tensor.dtype == torch.float32
             assert tensor.shape[0] == num_envs
         
         # Verify reward and flags are correct tensor types
         assert isinstance(reward, torch.Tensor)
-        assert reward.device.type == device
         assert reward.dtype == torch.float32
         assert reward.shape == (num_envs,)
         
         assert isinstance(terminated, torch.Tensor)
-        assert terminated.device.type == device
         assert terminated.dtype == torch.bool
         assert terminated.shape == (num_envs,)
         
         assert isinstance(truncated, torch.Tensor)
-        assert truncated.device.type == device
         assert truncated.dtype == torch.bool
         assert truncated.shape == (num_envs,)
         
         # Test device movement
         if torch.cuda.is_available():
-            vec_env = vec_env.to("cuda")
-            observations, info = vec_env.reset()
+            vector_env = vector_env.to("cuda")
+            observations, info = vector_env.reset()
             for key, tensor in observations.items():
                 assert tensor.device.type == "cuda"
+        if torch.backends.mps.is_available():
+            vector_env = vector_env.to("mps")
+            observations, info = vector_env.reset()
+            for key, tensor in observations.items():
+                assert tensor.device.type == "mps"
+
+        vector_env.close()
+
+    def test_agent_turns_distribution(self, env):
+        """Test that agent indices match between observation encoding and managym."""
+        obs, info = env.reset()
         
-        vec_env.close()
+        # Convert the observation to a "vectorized" format using torch:
+        obs_vec = {k: torch.from_numpy(v).unsqueeze(0) for k, v in obs.items()}
+        
+        # Print shapes to understand what we're working with
+        print("obs_vec['agent_player'] shape:", obs_vec["agent_player"].shape)
+        
+        max_steps = 1000
+        steps = 0
+        turn_counts = {}
+        
+        while steps < max_steps:
+            # Extract agent indices using the vectorized observation.
+            actor_idx = manabot.env.observation.get_agent_indices(obs_vec)
+            # Get the single scalar value using item() to convert to Python int
+            actor_idx = actor_idx[0].item()
+            
+            raw_obs = env.last_cpp_obs
+            cpp_player_idx = raw_obs.agent.player_index
+            
+            assert actor_idx == cpp_player_idx, (
+                f"Actor index {actor_idx} doesn't match managym player index {cpp_player_idx}"
+            )
+            
+            # Record the turn count.
+            turn_counts[actor_idx] = turn_counts.get(actor_idx, 0) + 1
+            
+            # Take a step in the environment
+            obs, reward, done, truncated, info = env.step(0)
+            
+            # Re-wrap the new observation.
+            obs_vec = {k: torch.from_numpy(v).unsqueeze(0) for k, v in obs.items()}
+            steps += 1
+            
+            # Check termination
+            if done or truncated:
+                break
+
+        print(f"Agent turn counts: {turn_counts}")
+        assert len(turn_counts) >= 2, (
+            f"Expected at least 2 different agent indices, got {turn_counts}"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__])

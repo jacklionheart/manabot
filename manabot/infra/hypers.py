@@ -14,9 +14,9 @@ from hydra.core.config_store import ConfigStore
 
 @dataclass
 class ObservationSpaceHypers:
-    max_cards: int = 100
-    max_permanents: int = 50
-    max_actions: int = 20
+    max_cards_per_player: int = 100
+    max_permanents_per_player: int = 50
+    max_actions: int = 10
     max_focus_objects: int = 2
 
 @dataclass
@@ -51,11 +51,10 @@ class ExperimentHypers:
 
 @dataclass
 class AgentHypers:
-    """Agent hyperparameters for network architecture."""
-    game_embedding_dim: int = 8
-    battlefield_embedding_dim: int = 8
+    # Shared embedding space for GameObjects and Actions.
     hidden_dim: int = 64
-    dropout_rate: float = 0.1
+    # Number of attention heads used in the GameObjectAttention layer.
+    num_attention_heads: int = 4
 
 @dataclass
 class TrainHypers:
@@ -96,8 +95,8 @@ class Hypers:
     
     def __post_init__(self):
         """Validate configuration after initialization."""    
-        if self.observation.max_cards < 1:
-            raise ValueError("max_cards must be positive")
+        if self.observation.max_cards_per_player < 1:
+            raise ValueError("max_cards_per_player must be positive")
             
         if self.observation.max_actions < 1:
             raise ValueError("max_actions must be positive")

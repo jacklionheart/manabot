@@ -1,41 +1,38 @@
 """
 test_observation.py
-Tests for data structures and observation encoding.
+Tests for observation encoding in manabot using minimal test configurations.
 
 This test suite verifies:
 1. Parity between Python and C++ enums for game state representation
-2. Observation encoding for the neural network
-3. Observation space sampling and validation
+2. ObservationEncoder produces expected tensor shapes and keys
+3. Validity masks accurately reflect game objects
+4. Object-to-index mapping is consistent
+5. Cross-observation independence 
+6. Focus indices validity
 """
 
 import pytest
 import numpy as np
-import managym
-import torch
-from typing import Dict, Tuple
+from typing import Tuple, Set
 
+import managym
 from manabot.env.observation import (
     ObservationSpace,
     ObservationSpaceHypers,
     ObservationEncoder,
     PhaseEnum,
     StepEnum,
-    ActionEnum,
     ZoneEnum,
 )
 
-# Fixtures for common test setup
+# ─────────────────────────── Fixtures ───────────────────────────
+
 @pytest.fixture(scope="session")
 def hypers():
-    """Create an encoder with minimal dimensions for testing.
-    
-    We use session scope since the encoder is stateless and can be reused.
-    Dimensions are chosen to be small enough for fast testing but large
-    enough to catch potential issues.
-    """
+    """Create an encoder with minimal dimensions for testing."""
     return ObservationSpaceHypers(
-        max_cards=3,
-        max_permanents=3,
+        max_cards_per_player=3,
+        max_permanents_per_player=2,
         max_actions=2,
         max_focus_objects=2,
     )
@@ -51,32 +48,35 @@ def observation_space(hypers):
     return ObservationSpace(hypers)
 
 @pytest.fixture(scope="session")
-def player_configs() -> Tuple[managym.PlayerConfig, managym.PlayerConfig]:
-    """Create consistent player configurations for testing.
-    
-    Using simple decks with known properties makes tests more predictable
-    and easier to debug.
-    """
-    player_a = managym.PlayerConfig("Alice", {"Mountain": 20, "Grey Ogre": 40})
-    player_b = managym.PlayerConfig("Bob", {"Forest": 20, "Llanowar Elves": 40})
-    return player_a, player_b
+def player_configs():
+    """Create consistent player configurations with minimal decks."""
+    player_a = managym.PlayerConfig("Alice", {"Mountain": 10, "Grey Ogre": 20})
+    player_b = managym.PlayerConfig("Bob", {"Forest": 10, "Llanowar Elves": 20})
+    return [player_a, player_b]
 
 @pytest.fixture
 def env():
-    """Create a fresh environment for each test.
-    
-    We use function scope to ensure each test starts with a clean environment.
-    """
-    env = managym.Env()
-    yield env
+    """Create a fresh environment for each test."""
+    return managym.Env()
 
 @pytest.fixture
-def initial_observation(env, player_configs) -> Tuple[managym.Observation, Dict]:
-    """Get the initial observation from a fresh environment."""
-    return env.reset(list(player_configs))
+def observation(env, player_configs) -> managym.Observation:
+    """Get a fresh observation from a newly reset environment."""
+    obs, _ = env.reset(player_configs)
+    return obs
+
+@pytest.fixture
+def two_observations(env, player_configs) -> Tuple[managym.Observation, managym.Observation]:
+    """Get two consecutive observations for testing observation independence."""
+    obs1, _ = env.reset(player_configs)
+    # Take an action to get a different game state
+    obs2, _, _, _, _ = env.step(0)  
+    return obs1, obs2
+
+# ─────────────────────────── Tests ───────────────────────────
 
 class TestEnumParity:
-    """Verify that our Python enums match the C++ implementation exactly."""
+    """Verify that our Python enums match the C++ ones exactly."""
     
     @pytest.mark.parametrize("py_enum, cpp_enum", [
         (ZoneEnum.LIBRARY, managym.ZoneEnum.LIBRARY),
@@ -88,7 +88,6 @@ class TestEnumParity:
         (ZoneEnum.COMMAND, managym.ZoneEnum.COMMAND),
     ])
     def test_zone_enum(self, py_enum, cpp_enum):
-        """Test zone enum parity one value at a time for clear error reporting."""
         assert int(cpp_enum) == py_enum
 
     @pytest.mark.parametrize("py_enum, cpp_enum", [
@@ -99,7 +98,6 @@ class TestEnumParity:
         (PhaseEnum.ENDING, managym.PhaseEnum.ENDING),
     ])
     def test_phase_enum(self, py_enum, cpp_enum):
-        """Test phase enum parity."""
         assert int(cpp_enum) == py_enum
 
     @pytest.mark.parametrize("py_enum, cpp_enum", [
@@ -117,115 +115,93 @@ class TestEnumParity:
         (StepEnum.ENDING_CLEANUP, managym.StepEnum.ENDING_CLEANUP),
     ])
     def test_step_enum(self, py_enum, cpp_enum):
-        """Test step enum parity."""
-        assert int(cpp_enum) == py_enum
-
-    @pytest.mark.parametrize("py_enum, cpp_enum", [
-        (ActionEnum.PRIORITY_PLAY_LAND, managym.ActionEnum.PRIORITY_PLAY_LAND),
-        (ActionEnum.PRIORITY_CAST_SPELL, managym.ActionEnum.PRIORITY_CAST_SPELL),
-        (ActionEnum.PRIORITY_PASS_PRIORITY, managym.ActionEnum.PRIORITY_PASS_PRIORITY),
-        (ActionEnum.DECLARE_ATTACKER, managym.ActionEnum.DECLARE_ATTACKER),
-        (ActionEnum.DECLARE_BLOCKER, managym.ActionEnum.DECLARE_BLOCKER),
-    ])
-    def test_action_enum(self, py_enum, cpp_enum):
-        """Test action enum parity."""
         assert int(cpp_enum) == py_enum
 
 class TestObservationEncoder:
-    """Test the encoding of game state observations into tensors."""
+    """Test the observation encoder's core functionality."""
 
-    def test_shapes(self, encoder):
-        """Verify that encoder produces tensors with correct shapes."""
-        shapes = encoder.shapes
+    def get_expected_keys(self) -> Set[str]:
+        """Get the complete set of expected keys in an encoded observation."""
+        return {
+            # Players
+            "agent_player", "agent_player_valid",
+            "opponent_player", "opponent_player_valid",
+            
+            # Cards
+            "agent_cards", "agent_cards_valid",
+            "opponent_cards", "opponent_cards_valid",
+            
+            # Permanents
+            "agent_permanents", "agent_permanents_valid",
+            "opponent_permanents", "opponent_permanents_valid",
+            
+            # Actions
+            "actions", "actions_valid", "action_focus"
+        }
+
+    def test_encode_observation(self, observation_space, observation):
+        """Test that encoding produces arrays with correct shapes and no invalid values."""
+        encoded = observation_space.encode(observation)
         
-        # Global state shape includes turn number, phase/step one-hot, and game outcome
-        assert shapes['global'] == (1 + len(PhaseEnum) + len(StepEnum) + 2,)
+        # Verify all expected keys are present
+        expected_keys = self.get_expected_keys()
+        assert set(encoded.keys()) == expected_keys, f"Keys mismatch. Missing: {expected_keys - set(encoded.keys())}"
         
-        assert shapes['players'] == (2, 5 + len(ZoneEnum))
+        # Check shapes match specification
+        for key in encoded:
+            expected_shape = observation_space.shapes[key]
+            assert encoded[key].shape == expected_shape, f"Shape mismatch for {key}"
+            assert not np.isnan(encoded[key]).any(), f"NaN found in {key}"
+            assert not np.isinf(encoded[key]).any(), f"Inf found in {key}"
+
+
+    def test_validity_masks(self, observation_space, observation, hypers):
+        """Test that validity masks correctly reflect the game state."""
+        encoded = observation_space.encode(observation)
         
-        # Verify card, permanent, and action shapes match encoder settings
-        assert shapes['cards'] == (3, encoder.card_dim)
-        assert shapes['permanents'] == (3, encoder.permanent_dim)
-        assert shapes['actions'] == (2, encoder.action_dim)
-
-    def test_encode_from_managym(self, encoder, initial_observation):
-        """Test encoding of actual managym observations."""
-        cpp_obs, _ = initial_observation
-        tensors = encoder.encode(cpp_obs)
+        # Check cards validity
+        agent_cards_valid = encoded["agent_cards_valid"]
+        actual_cards = len(observation.agent_cards)
+        expected_valid = min(actual_cards, hypers.max_cards_per_player)
+        valid_sum = int(agent_cards_valid.sum())  # Convert to Python int for comparison
+        assert valid_sum == expected_valid, \
+            f"Expected {expected_valid} valid cards, got {valid_sum}"
         
-        # Verify dictionary structure
-        assert isinstance(tensors, dict)
-        assert set(tensors.keys()) == {'global', 'players', 'cards', 'permanents', 'actions'}
+        # Verify invalid slots are zeroed
+        for key in ["agent_cards", "opponent_cards", "agent_permanents", "opponent_permanents"]:
+            valid_key = f"{key}_valid"
+            invalid = ~encoded[valid_key].astype(bool)
+            if np.any(invalid):
+                array_slice = encoded[key][invalid]
+                assert (array_slice == 0).all(), \
+                    f"Non-zero values found in invalid {key} slots: {array_slice[array_slice != 0]}"
+
+    def test_object_index_mapping(self, observation_space, observation, hypers):
+        """Test that object IDs are mapped to consistent indices."""
+        encoded = observation_space.encode(observation)
+        mapping = observation_space.encoder.object_to_index
         
-        # Verify shapes match encoder specifications
-        for name, shape in encoder.shapes.items():
-            assert tensors[name].shape == shape
-            # Verify no NaN/Inf values
-            assert not np.isnan(tensors[name]).any(), f"NaN values in {name}"
-            assert not np.isinf(tensors[name]).any(), f"Inf values in {name}"
+        # Find a sample card ID
+        if observation.agent_cards:
+            card_id = next(iter(observation.agent_cards.keys()))
+            assert card_id in mapping, "Card ID not found in mapping"
+            idx = mapping[card_id]
+            # Index should be after players but before max objects
+            total_objects = 2 + hypers.max_cards_per_player * 2 + hypers.max_permanents_per_player * 2
+            assert 2 <= idx < total_objects
 
-    def test_encode_focus_object(self, encoder, initial_observation):
-        """Test encoding of individual game objects (players, cards, permanents)."""
-        cpp_obs, _ = initial_observation
+
+    def test_focus_indices(self, observation_space, observation, hypers):
+        """Test that action focus indices are valid."""
+        encoded = observation_space.encode(observation)
+        focus = encoded["action_focus"]
         
-        # Test player focus encoding
-        focus = encoder.encode_focus_object(cpp_obs, 0)
-        assert len(focus) == encoder.focus_dim
-        assert focus[2] == 20.0, "Initial life total should be 20"
+        # Calculate valid range for focus indices
+        total_objects = 2 + hypers.max_cards_per_player * 2 + hypers.max_permanents_per_player * 2
         
-        # Test card focus encoding (if cards exist)
-        if cpp_obs.cards:
-            card_id = next(iter(cpp_obs.cards.keys()))
-            focus = encoder.encode_focus_object(cpp_obs, card_id)
-            assert len(focus) == encoder.focus_dim
-            assert not np.isnan(focus).any(), "NaN values in card encoding"
-        
-        # Test permanent focus encoding (if permanents exist)
-        if cpp_obs.permanents:
-            perm_id = next(iter(cpp_obs.permanents.keys()))
-            focus = encoder.encode_focus_object(cpp_obs, perm_id)
-            assert len(focus) == encoder.focus_dim
-            assert not np.isnan(focus).any(), "NaN values in permanent encoding"
+        # All indices should be either -1 (no focus) or within valid range
+        valid = (focus == -1) | ((focus >= 0) & (focus < total_objects))
+        assert valid.all(), f"Invalid focus indices found: {focus[~valid]}"
 
-        # Test invalid object handling
-        focus = encoder.encode_focus_object(cpp_obs, 99999)
-        assert np.all(focus == 0), "Invalid object should encode to zeros"
-
-class TestObservationSpace:
-    """Test the observation space specification and sampling."""
-
-    def test_sample(self, observation_space, encoder):
-        """Test observation sampling and bounds."""
-        sample = observation_space.sample()
-        
-        # Verify dictionary structure
-        assert isinstance(sample, dict)
-        assert set(sample.keys()) == {'global', 'players', 'cards', 'permanents', 'actions'}
-        
-        # Verify shapes match encoder
-        for name, shape in encoder.shapes.items():
-            assert sample[name].shape == shape
-            # Verify no NaN/Inf values
-            assert not np.isnan(sample[name]).any(), f"NaN values in {name}"
-            assert not np.isinf(sample[name]).any(), f"Inf values in {name}"
-
-
-    def test_contains(self, observation_space):
-        """Test observation space membership checking."""
-        # Valid sample should be contained
-        sample = observation_space.sample()
-        assert observation_space.contains(sample)
-
-        # Test invalid shapes
-        bad_sample = {k: v[:-1] for k, v in sample.items()}
-        assert not observation_space.contains(bad_sample)
-
-
-    def test_encode_from_managym(self, observation_space, initial_observation):
-        """Test that encoded observations are valid members of the space."""
-        cpp_obs, _ = initial_observation
-        tensors = observation_space.encode(cpp_obs)
-        assert observation_space.contains(tensors)
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     pytest.main([__file__])

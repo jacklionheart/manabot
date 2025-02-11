@@ -13,7 +13,9 @@ import numpy as np
 import managym
 from .observation import ObservationSpace
 from .match import Match, Reward
+from manabot.infra import getLogger
 
+logger = getLogger(__name__)
 class Env(gym.Env):
     metadata = {"render_modes": ["human"], "render_fps": 30}
 
@@ -21,7 +23,16 @@ class Env(gym.Env):
         self,
         match: Match,
         obs_space: ObservationSpace,
-        reward: Reward
+        reward: Reward,
+        # Whether to automatically reset the environment when it terminates/truncates.
+        # If False, the environment will not be reset until the agent calls reset().
+        # If True, when a terminated/truncated event occurs, the environment returns:
+        # - the post-reset observation,
+        # - the pre-reset reward,
+        # - false, # terminate is never true so that AsyncVectorEnv doesnt call reset()
+        # - false, # truncated is never true so that AsyncVectorEnv doesnt call reset()
+        # - info["true_terminated"]: true
+        auto_reset: bool = False
     ):
         """
         Gymnasium-compatible Env wrapper around the managym.Env C++ class.
@@ -43,6 +54,7 @@ class Env(gym.Env):
 
         self.match = match
         self.reward = reward
+        self.auto_reset = auto_reset
 
     def reset(
         self,
@@ -80,6 +92,7 @@ class Env(gym.Env):
     def step(self, action: int) -> tuple[dict, float, bool, bool, dict]:
         """
         Step the environment by applying `action` (int).
+        Automatically 
 
         Args:
             action: Chosen action index (within our placeholder discrete space).
@@ -91,12 +104,24 @@ class Env(gym.Env):
             truncated: Whether the episode ended due to a timelimit or external condition.
             info: Additional debug info from managym, e.g. partial game logs.
         """
+        log = logger.getChild("step")
         cpp_obs, cpp_reward, terminated, truncated, info = self._cpp_env.step(action)
+        reward = self.reward.compute(cpp_reward, self._last_obs, cpp_obs)
+        info["true_terminated"] = terminated
+        info["true_truncated"] = truncated
+
+
+        log.debug(f"Stepped env. Step output: reward={cpp_reward}, terminated={terminated}, truncated={truncated}")
+        if terminated or truncated:
+            log.info(f"Episode terminated: {terminated}, truncated: {truncated}")
+            if self.auto_reset:
+                # TODO: merge infos? Hopefully we remove this code soon and use gymnasium's autoreset when its released
+                cpp_obs, _ = self._cpp_env.reset(self.match.to_cpp())
+                terminated = False
+                truncated = False
+        
         py_obs = self.obs_space.encode(cpp_obs)
         self._last_obs = cpp_obs
-
-        reward = self.reward.compute(cpp_reward, self._last_obs, cpp_obs)
-
         return py_obs, reward, terminated, truncated, info
 
     def render(self):
@@ -105,22 +130,29 @@ class Env(gym.Env):
     def close(self):
         pass
 
+    @property
+    def last_cpp_obs(self):
+        return self._last_obs
+
+
+
 class VectorEnv:
     """
     Vector environment that automatically batches observations from multiple environments
     and converts them to PyTorch tensors. The first dimension is always the number of 
     environments.
     """
-    def __init__(self, num_envs: int, match: Match, observation_space: ObservationSpace, reward: Reward, device: str = "cpu"):
+    def __init__(self, num_envs: int, match: Match, observation_space: ObservationSpace, reward: Reward, device: str):
         self._env = gym.vector.AsyncVectorEnv(
-            [lambda: Env(match, observation_space, reward) for _ in range(num_envs)],
+            [lambda: Env(match, observation_space, reward, auto_reset=True) for _ in range(num_envs)],
             shared_memory=False
+
         )
         self.observation_space = observation_space
         self.num_envs = num_envs
         self.device = torch.device(device)
 
-    def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None) -> Tuple[Dict[str, torch.Tensor], Dict]:
+    def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None) -> Tuple[Dict[str, torch.Tensor], Dict[str, Any]]:
         """
         Reset all environments and return batched observations as tensors.
 
@@ -131,7 +163,14 @@ class VectorEnv:
         obs_tuple, info = self._env.reset(seed=seed, options=options)
         return self._process_obs(obs_tuple), info
 
-    def step(self, actions: torch.Tensor) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor, Dict]:
+    def _parse_bool(self, val):
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, str):
+            return val.lower() == "true"
+        return bool(val)
+
+    def step(self, actions: torch.Tensor) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, Any]]:
         """
         Step all environments and return batched observations and rewards as tensors.
 
@@ -141,20 +180,27 @@ class VectorEnv:
         Returns:
             observations: Dict where each value is a tensor with shape (num_envs, ...)
             rewards: Tensor of shape (num_envs,)
-            terminated: Tensor of shape (num_envs,)
-            truncated: Tensor of shape (num_envs,)
+            terminated: Tensor of shape (num_envs,) containing true termination state
+            truncated: Tensor of shape (num_envs,) containing true truncation state
             info: Dict of additional information
         """
-        # Convert actions to numpy for the underlying env
         actions_np = actions.cpu().numpy()
         obs_tuple, rewards, terminated, truncated, info = self._env.step(actions_np)
         
+        # Get true termination states from info arrays
+        true_terminated = info.get('true_terminated', terminated)
+        true_truncated = info.get('true_truncated', truncated)
+        
         # Convert everything to tensors
+        rewards_tensor = torch.tensor(rewards, dtype=torch.float32).to(self.device)
+        terminated_tensor = torch.tensor(true_terminated, dtype=torch.bool).to(self.device)
+        truncated_tensor = torch.tensor(true_truncated, dtype=torch.bool).to(self.device)
+        
         return (
             self._process_obs(obs_tuple),
-            torch.as_tensor(rewards, device=self.device, dtype=torch.float32),
-            torch.as_tensor(terminated, device=self.device, dtype=torch.bool),
-            torch.as_tensor(truncated, device=self.device, dtype=torch.bool),
+            rewards_tensor,
+            terminated_tensor,
+            truncated_tensor,
             info
         )
 
@@ -179,7 +225,7 @@ class VectorEnv:
         for key in keys:
             arrays = [obs[key] for obs in obs_tuple]
             stacked = np.stack(arrays)
-            batched[key] = torch.as_tensor(stacked, device=self.device, dtype=torch.float32)
+            batched[key] = torch.tensor(stacked, dtype=torch.float32).to(self.device)
             
         return batched
     
@@ -199,3 +245,4 @@ class VectorEnv:
     def close(self):
         """Close the environment."""
         self._env.close()
+

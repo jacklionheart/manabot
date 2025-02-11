@@ -82,7 +82,7 @@ class Reward:
     def __init__(self, hypers: RewardHypers):
         self.hypers = hypers
 
-    def compute(self, cpp_reward : int, last_obs : managym.Observation, new_obs : managym.Observation) -> float:
+    def compute(self, cpp_reward : float, last_obs : managym.Observation, new_obs : managym.Observation) -> float:
         if self.hypers.managym:
             return cpp_reward   
 
@@ -90,12 +90,8 @@ class Reward:
             return 1.0
 
         else:
-            if new_obs.game_over:
-                agent = last_obs.players[0].player_index
-                # The "agent" should not change when the game is over
-                assert agent == new_obs.players[0].player_index
-                
-                if new_obs.won == agent:
+            if new_obs.game_over:                
+                if new_obs.won == last_obs.agent.player_index:
                     return self.hypers.win_reward
                 else:
                     return self.hypers.lose_reward
