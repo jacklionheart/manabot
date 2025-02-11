@@ -18,7 +18,7 @@ import pytest
 import torch
 import torch.nn as nn
 import copy
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Generator
 
 from manabot.env import ObservationSpace
 from manabot.infra.hypers import AgentHypers, ObservationSpaceHypers
@@ -59,7 +59,7 @@ def agent(observation_space: ObservationSpace, agent_hypers: AgentHypers) -> Age
     return Agent(observation_space, agent_hypers)
 
 @pytest.fixture
-def real_observation(observation_space: ObservationSpace) -> Dict[str, torch.Tensor]:
+def real_observation(observation_space: ObservationSpace) -> Generator[Dict[str, torch.Tensor], None, None]:
     """
     Create a real observation using a VectorEnv and the actual manabot observation encoder.
     
@@ -201,12 +201,10 @@ def test_focus_object_incorporation(agent: Agent, real_observation: Dict[str, to
 # -----------------------------------------------------------------------------
 
 def test_action_masking(agent: Agent, real_observation: Dict[str, torch.Tensor]):
-    """
-    Verify that action masking properly prevents selection of invalid actions.
-    """
+    """Verify that action masking properly prevents selection of invalid actions."""
     obs = real_observation
     with torch.no_grad():
-        action, logprob, entropy, value = agent.get_action_and_value(obs)
+        action, _, _, _ = agent.get_action_and_value(obs)
     
     action_mask = obs["actions_valid"]
     batch_size = action_mask.shape[0]

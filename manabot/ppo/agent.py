@@ -22,7 +22,7 @@ class Agent(nn.Module):
         super().__init__()
         self.observation_space = observation_space
         self.hypers = hypers
-        
+
         # Extract dimensions from observation embedding configuration.
         enc = observation_space.encoder
         player_dim = enc.player_dim
@@ -30,9 +30,7 @@ class Agent(nn.Module):
         perm_dim = enc.permanent_dim
         action_dim = enc.action_dim  # this is 6 (5 action types + validity flag)
         self.max_focus_objects = enc.max_focus_objects
-        max_actions = enc.max_actions
         embed_dim = hypers.hidden_dim
-        num_heads = hypers.num_attention_heads
 
         # Typed object embeddings.
         self.player_embedding = ProjectionLayer(player_dim, embed_dim)
@@ -45,9 +43,12 @@ class Agent(nn.Module):
         logger.info(f"Perm embedding: ({perm_dim} -> {embed_dim})")
         logger.info(f"Action embedding: ({action_dim - 1} -> {embed_dim})")
         
+        # Currently not using attention
         # Global game state processor.
-        self.attention = GameObjectAttention(embed_dim, num_heads=num_heads)
-        logger.info(f"Attention: {embed_dim} -> {embed_dim}")
+        # num_heads = hypers.num_attention_heads
+        #self.attention = GameObjectAttention(embed_dim, num_heads=num_heads)
+        # logger.info(f"Attention: {embed_dim} -> {embed_dim}")
+        
         # Action processing.
         actions_with_focus_dim = (self.max_focus_objects + 1) * embed_dim
         self.action_layer = ProjectionLayer(actions_with_focus_dim, embed_dim)
@@ -79,7 +80,8 @@ class Agent(nn.Module):
 
         key_padding_mask = (validity == 0)  # [B, total_objs]
         log.debug(f"Key padding mask: {key_padding_mask.shape}")
-        post_attention_objects = self.attention(objects, is_agent, key_padding_mask=key_padding_mask)
+        # post_attention_objects = self.attention(objects, is_agent, key_padding_mask=key_padding_mask)
+        post_attention_objects = objects
         log.debug(f"Post attention objects: {post_attention_objects.shape}")
 
         informed_actions = self._gather_informed_actions(obs, post_attention_objects)
@@ -164,6 +166,8 @@ class Agent(nn.Module):
         Order: agent_player, opponent_player, agent_cards, opponent_cards, agent_permanents, opponent_permanents.
         """
         log = logger.getChild("gather_object_embeddings")
+        device = obs["agent_player"].device
+        log.debug(f"Device: {device}")
         log.debug(f"Obs['agent_player']: {obs['agent_player'].shape}")
         log.debug(f"Obs['opponent_player']: {obs['opponent_player'].shape}")
         log.debug(f"Obs['agent_cards']: {obs['agent_cards'].shape}")
@@ -181,12 +185,13 @@ class Agent(nn.Module):
             enc_agent_perms, enc_opp_perms
         ], dim=1)  # [B, total_objs, embed_dim]
 
-        agent_player_is_agent = torch.ones(enc_agent_player.shape[0], enc_agent_player.shape[1], dtype=torch.bool)
-        opponent_player_is_agent = torch.zeros(enc_opp_player.shape[0], enc_opp_player.shape[1], dtype=torch.bool)
-        agent_cards_is_agent = torch.ones(enc_agent_cards.shape[0], enc_agent_cards.shape[1], dtype=torch.bool)
-        opp_cards_is_agent = torch.zeros(enc_opp_cards.shape[0], enc_opp_cards.shape[1], dtype=torch.bool)
-        agent_perms_is_agent = torch.ones(enc_agent_perms.shape[0], enc_agent_perms.shape[1], dtype=torch.bool)
-        opp_perms_is_agent = torch.zeros(enc_opp_perms.shape[0], enc_opp_perms.shape[1], dtype=torch.bool)
+
+        agent_player_is_agent = torch.ones(enc_agent_player.shape[0], enc_agent_player.shape[1], dtype=torch.bool, device=device)
+        opponent_player_is_agent = torch.zeros(enc_opp_player.shape[0], enc_opp_player.shape[1], dtype=torch.bool, device=device)
+        agent_cards_is_agent = torch.ones(enc_agent_cards.shape[0], enc_agent_cards.shape[1], dtype=torch.bool, device=device)
+        opp_cards_is_agent = torch.zeros(enc_opp_cards.shape[0], enc_opp_cards.shape[1], dtype=torch.bool, device=device)
+        agent_perms_is_agent = torch.ones(enc_agent_perms.shape[0], enc_agent_perms.shape[1], dtype=torch.bool, device=device)
+        opp_perms_is_agent = torch.zeros(enc_opp_perms.shape[0], enc_opp_perms.shape[1], dtype=torch.bool, device=device)
         is_agent = torch.cat([ 
             agent_player_is_agent,
             opponent_player_is_agent,

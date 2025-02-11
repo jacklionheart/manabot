@@ -359,5 +359,12 @@ class ObservationSpace(gym.spaces.Space):
                 return False
         return True
 
-def get_agent_indices(obs: Dict[str, np.ndarray]) -> np.ndarray:
-    return obs["agent_player"][:, 0].astype(np.int64)
+def get_agent_indices(obs: Dict[str, torch.Tensor]) -> torch.Tensor:
+    """Returns a tensor of agent indices from the observation.
+    
+    Shape: (batch_size,)
+    Type: torch.int64
+    """
+    # Input shape is (batch_size, 1, features)
+    # We want the first feature for each item in the batch
+    return obs["agent_player"][:, 0, 0].to(dtype=torch.int64)

@@ -1,21 +1,20 @@
 """
 trainer.py
 
-The primary interface for training is the `Trainer` class.
+The primary interface for training is the Trainer class.
 
 PPO training steps:
   - Collect trajectories (rollouts) using vectorized environments.
-  - Compute advantages.
+  - Compute advantages using GAE.
   - Perform PPO updates.
+  - Save/load checkpoints.
 
-Additional responsibilities:
-  - Logging training metrics.
-  - Saving and loading checkpoints.
+This version uses a multi-agent buffer organized as (num_envs x num_players) queues.
 """
 
+from collections import defaultdict
 import time
 from typing import Dict, Tuple, List
-
 import numpy as np
 import psutil
 import torch
@@ -25,191 +24,196 @@ import wandb
 from manabot.ppo.agent import Agent
 from manabot.infra.experiment import Experiment
 from manabot.infra.hypers import TrainHypers
-from manabot.env import ObservationSpace, VectorEnv
+from manabot.env import VectorEnv
 from manabot.infra import getLogger
-logger = getLogger(__name__)
 import manabot.env.observation
 
-# =============================================================================
-#  Internal Classes
-# =============================================================================
+logger = getLogger(__name__)
+
+# -----------------------------------------------------------------------------
+# Buffer Classes
+# -----------------------------------------------------------------------------
 
 class PPOBuffer:
-    def __init__(self, observation_space: ObservationSpace, num_envs: int, device: str):
-        # Pre-allocate tensors for just the batch dimension
-        self.obs = {
-            k: torch.zeros((num_envs,) + space.shape, dtype=torch.float32, device=device)
-            for k, space in observation_space.spaces.items()
-        }
-        self.actions = torch.zeros(num_envs, dtype=torch.int64, device=device)
-        self.logprobs = torch.zeros(num_envs, dtype=torch.float32, device=device)
-        self.rewards = torch.zeros(num_envs, dtype=torch.float32, device=device)
-        self.values = torch.zeros(num_envs, dtype=torch.float32, device=device) 
-        self.dones = torch.zeros(num_envs, dtype=torch.bool, device=device)
-        
+    def __init__(self, device: str):
         self.device = device
-        self.num_envs = num_envs
+        self.reset()
+    def store(self, obs: dict, action: torch.Tensor, reward: torch.Tensor,
+              value: torch.Tensor, logprob: torch.Tensor, done: torch.Tensor) -> None:
+        # Ensure each observation tensor is stored properly
+        for k, v in obs.items():
+            # Stack tensors along a new dimension
+            self.obs_buff[k].append(v.unsqueeze(0))
+        self.actions_buf.append(action.unsqueeze(0))
+        self.logprobs_buf.append(logprob.unsqueeze(0))
+        self.rewards_buf.append(reward.unsqueeze(0))
+        self.values_buf.append(value.unsqueeze(0))
+        self.dones_buf.append(done.unsqueeze(0))
 
-    def store(self, obs: Dict[str, torch.Tensor],
-                    action: torch.Tensor,
-                    reward: torch.Tensor,
-                    value: torch.Tensor,
-                    logprob: torch.Tensor,
-                    done: torch.Tensor) -> None:
-        """Store a transition."""
-        with torch.no_grad():
-            for k, v in obs.items():
-                self.obs[k] = v
-            self.actions = action
-            self.rewards = reward
-            self.values = value
-            self.logprobs = logprob
-            self.dones = done
+    def compute_advantages(self, gamma: float, gae_lambda: float, next_value: torch.Tensor, next_done: torch.Tensor):
+        """
+        Compute advantages using GAE for the transitions in this buffer.
+        next_value: a scalar bootstrap value for this (env, player) pair.
+        next_done: a scalar (0 or 1) indicating if the environment was done.
+        """
+        self.obs = {k: torch.cat(v, dim=0) for k, v in self.obs_buff.items()}
+        self.actions = torch.cat(self.actions_buf, dim=0)
+        self.logprobs = torch.cat(self.logprobs_buf, dim=0)
+        self.rewards = torch.cat(self.rewards_buf, dim=0)
+        self.values = torch.cat(self.values_buf, dim=0)
+        self.dones = torch.cat(self.dones_buf, dim=0)
+
+        T = self.rewards.shape[0]
+        if T == 0:
+            self.advantages = torch.tensor([], device=self.device)
+            self.returns = torch.tensor([], device=self.device)
+            return
+
+        advantages = torch.zeros_like(self.rewards)
+        lastgaelam = 0.0
+        for t in reversed(range(T)):
+            if t == T - 1:
+                # For the last timestep, use the externally provided next_done flag.
+                next_non_terminal = 1.0 - next_done.float()
+                next_val = next_value
+            else:
+                next_non_terminal = 1.0 - self.dones[t + 1].float()
+                next_val = self.values[t + 1]
+            delta = self.rewards[t] + gamma * next_val * next_non_terminal - self.values[t]
+            lastgaelam = delta + gamma * gae_lambda * next_non_terminal * lastgaelam
+            advantages[t] = lastgaelam
+
+        self.advantages = advantages
+        self.returns = advantages + self.values
 
 
-    def compute_advantages(self, next_value: torch.Tensor, next_done: torch.Tensor,
-                           gamma: float, gae_lambda: float) -> None:
-        """Compute advantages and returns using GAE."""
-        with torch.no_grad():
-            if self.step_idx == 0:
-                self.advantages = self.rewards[:0]
-                self.returns = self.values[:0]
-                return
+    def reset(self):
+        # Clear the stored lists.
+        self.obs_buff = defaultdict(list)
+        self.actions_buf = []
+        self.logprobs_buf = []
+        self.rewards_buf = []
+        self.values_buf = []
+        self.dones_buf = []
+        self.obs = None
+        self.actions = None
+        self.logprobs = None
+        self.rewards = None
+        self.values = None
+        self.dones = None
 
-            self.advantages = torch.zeros_like(self.rewards[:self.step_idx])
-            lastgaelam = torch.zeros(self.rewards.shape[1], device=self.device)
-            for t in reversed(range(self.step_idx)):
-                if t == self.step_idx - 1:
-                    nextnonterminal = 1.0 - next_done.float()
-                    nextvalues = next_value
-                else:
-                    nextnonterminal = 1.0 - self.dones[t + 1].float()
-                    nextvalues = self.values[t + 1]
-                delta = self.rewards[t] + gamma * nextvalues * nextnonterminal - self.values[t]
-                lastgaelam = delta + gamma * gae_lambda * nextnonterminal * lastgaelam
-                self.advantages[t] = lastgaelam
-            self.returns = self.advantages + self.values[:self.step_idx]
-            logger.debug("Computed advantages and returns for current buffer.")
-
-    def get_flattened(self) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor,
-                                      torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Flatten the stored transitions for PPO updates."""
-        if self.advantages is None:
-            raise ValueError("Call compute_advantages() before get_flattened()")
-        assert self.returns is not None
-
-        b_obs = {k: v[:self.step_idx].reshape((-1,) + v.shape[2:]) for k, v in self.obs.items()}
-        b_logprobs = self.logprobs[:self.step_idx].reshape(-1)
-        b_actions = self.actions[:self.step_idx].reshape(-1)
-        b_advantages = self.advantages[:self.step_idx].reshape(-1)
-        b_returns = self.returns[:self.step_idx].reshape(-1)
-        b_values = self.values[:self.step_idx].reshape(-1)
-        logger.debug(f"Flattened buffer: {self.step_idx} transitions.")
-        return b_obs, b_logprobs, b_actions, b_advantages, b_returns, b_values
-
-    def reset(self) -> None:
-        """Reset the buffer for the next rollout."""
-        logger.debug("Resetting PPOBuffer.")
-        self.step_idx = 0
         self.advantages = None
         self.returns = None
 
 
 class MultiAgentBuffer:
     """
-    Maintains separate PPOBuffer instances for each player.
-    Transitions for a given environment are stored only in the buffer of the actor who took the move.
+    Maintains a separate PPOBuffer for each (env, player) pair.
     """
-    def __init__(self, observation_space: ObservationSpace, num_steps: int, num_envs: int,
-                 device: str, num_players: int = 2):
-        self.buffers: Dict[int, PPOBuffer] = {
-            pid: PPOBuffer(observation_space, num_envs, device)
+    def __init__(self, device: str, num_envs: int, num_players: int = 2):
+        self.device = device
+        self.num_envs = num_envs
+        self.num_players = num_players
+        # Create a dictionary with key (env_index, player_id)
+        self.buffers = {
+            (env_idx, pid): PPOBuffer(device)
+            for env_idx in range(num_envs)
             for pid in range(num_players)
         }
 
-    def store(self, obs: Dict[str, torch.Tensor],
-                    action: torch.Tensor,
-                    reward: torch.Tensor,
-                    value: torch.Tensor,
-                    logprob: torch.Tensor,
-                    done: torch.Tensor,
-                    actor_ids: torch.Tensor) -> None:
-        """
-        For each environment in the batch, store the transition in the buffer corresponding
-        to the actor who took the action.
-        """
-        for pid, buffer in self.buffers.items():
-            indices = (actor_ids == pid).nonzero(as_tuple=True)[0]
-            if indices.numel() == 0:
-                continue
-            sub_obs = {k: v[indices] for k, v in obs.items()}
-            sub_action = action[indices]
-            sub_reward = reward[indices]
-            sub_value = value[indices]
-            sub_logprob = logprob[indices]
-            sub_done = done[indices]
-            buffer.store(sub_obs, sub_action, sub_reward, sub_value, sub_logprob, sub_done)
-            logger.debug(f"Stored {indices.numel()} transitions for player {pid}.")
+    def store(self, obs: dict, action: torch.Tensor, reward: torch.Tensor,
+              value: torch.Tensor, logprob: torch.Tensor, done: torch.Tensor,
+              actor_ids: torch.Tensor) -> None:
+        # For each environment in the batch, store the transition in the buffer for the acting player.
+        num_envs = action.shape[0]
+        for i in range(num_envs):
+            pid = int(actor_ids[i].item())
+            key = (i, pid)
+            single_obs = {k: v[i] for k, v in obs.items()}
+            self.buffers[key].store(single_obs, action[i], reward[i],
+                                      value[i], logprob[i], done[i])
 
-    def compute_advantages(self, next_value: torch.Tensor, next_done: torch.Tensor,
-                           gamma: float, gae_lambda: float) -> None:
-        for pid, buffer in self.buffers.items():
-            logger.debug(f"Computing advantages for player {pid} with {buffer.step_idx} transitions.")
-            buffer.compute_advantages(next_value, next_done, gamma, gae_lambda)
+    def compute_advantages(self, next_values: torch.Tensor, next_dones: torch.Tensor, gamma: float, gae_lambda: float):
+        """
+        Compute advantages for each (env, player) buffer.
+        next_values: tensor of shape (num_envs,) for each environment.
+        next_dones: tensor of shape (num_envs,) for each environment.
+        """
+        for env in range(self.num_envs):
+            for pid in range(self.num_players):
+                buf = self.buffers[(env, pid)]
+                if len(buf.actions_buf) == 0:
+                    continue
+                bootstrap_value = next_values[env] if not next_dones[env].item() else torch.tensor(0.0, device=self.device)
+                buf.compute_advantages(gamma, gae_lambda, bootstrap_value, next_dones[env])
 
     def get_flattened(self) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor,
                                       torch.Tensor, torch.Tensor, torch.Tensor]:
-        obs_list: Dict[str, List[torch.Tensor]] = {}
-        logprobs_list = []
-        actions_list = []
-        advantages_list = []
-        returns_list = []
-        values_list = []
-        for pid, buffer in self.buffers.items():
-            try:
-                b_obs, b_logprobs, b_actions, b_advantages, b_returns, b_values = buffer.get_flattened()
-            except ValueError:
+        """
+        Flatten transitions from all (env, player) buffers into a single batch.
+        Returns:
+          merged_obs, merged_logprobs, merged_actions, merged_advantages, merged_returns, merged_values
+        """
+        all_obs = []
+        all_logprobs = []
+        all_actions = []
+        all_advantages = []
+        all_returns = []
+        all_values = []
+
+        for buf in self.buffers.values():
+            assert(buf.obs is not None)
+            assert(buf.actions is not None)
+            assert(buf.logprobs is not None)
+            assert(buf.values is not None)
+            assert(buf.advantages is not None)
+            assert(buf.returns is not None)
+            
+            if len(buf.actions) == 0:
                 continue
-            if b_logprobs.numel() == 0:
-                continue
-            for key, tensor in b_obs.items():
-                obs_list.setdefault(key, []).append(tensor)
-            logprobs_list.append(b_logprobs)
-            actions_list.append(b_actions)
-            advantages_list.append(b_advantages)
-            returns_list.append(b_returns)
-            values_list.append(b_values)
-            logger.info(f"Player {pid} buffer flattened with {b_logprobs.numel()} transitions.")
-        if len(logprobs_list) == 0:
+            # Accumulate all tensors
+            all_obs.append(buf.obs)
+            all_logprobs.append(buf.logprobs)
+            all_actions.append(buf.actions)
+            all_advantages.append(buf.advantages)
+            all_returns.append(buf.returns)
+            all_values.append(buf.values)
+
+        if not all_obs:
             raise ValueError("No valid transitions found in any buffer.")
-        merged_obs = {k: torch.cat(tensors, dim=0) for k, tensors in obs_list.items()}
-        merged_logprobs = torch.cat(logprobs_list, dim=0)
-        merged_actions = torch.cat(actions_list, dim=0)
-        merged_advantages = torch.cat(advantages_list, dim=0)
-        merged_returns = torch.cat(returns_list, dim=0)
-        merged_values = torch.cat(values_list, dim=0)
+
+        # Merge observations from all buffers
+        merged_obs = {}
+        for k in all_obs[0].keys():
+            merged_obs[k] = torch.cat([obs[k] for obs in all_obs], dim=0)
+
+        # Merge other tensors
+        merged_logprobs = torch.cat(all_logprobs, dim=0)
+        merged_actions = torch.cat(all_actions, dim=0)
+        merged_advantages = torch.cat(all_advantages, dim=0)
+        merged_returns = torch.cat(all_returns, dim=0)
+        merged_values = torch.cat(all_values, dim=0)
+
         return merged_obs, merged_logprobs, merged_actions, merged_advantages, merged_returns, merged_values
+    
+    def reset(self):
+        for buf in self.buffers.values():
+            buf.reset()
 
-    def reset(self) -> None:
-        for pid, buffer in self.buffers.items():
-            logger.debug(f"Resetting buffer for player {pid}.")
-            buffer.reset()
-
-
-# =============================================================================
+# -----------------------------------------------------------------------------
 # Trainer Class
-# =============================================================================
+# -----------------------------------------------------------------------------
 
 class Trainer:
     """
     PPO Trainer for manabot.
 
     Implements the training loop:
-      1. Collect trajectories (rollouts) using vectorized environments.
-      2. Compute advantages per player buffer.
+      1. Collect trajectories using vectorized environments.
+      2. Compute advantages per (env, player) buffer.
       3. Merge buffers for a unified policy update.
       4. Run multiple update epochs with detailed logging.
-    
+
     Also provides checkpoint saving/loading functionality.
     """
     def __init__(self, agent: Agent, experiment: Experiment,
@@ -218,7 +222,7 @@ class Trainer:
         self.experiment = experiment
         self.env = env
         self.hypers = hypers
-        self.global_step = 0  # global step counter
+        self.global_step = 0
 
         self.optimizer = torch.optim.Adam(
             self.agent.parameters(),
@@ -227,11 +231,8 @@ class Trainer:
             weight_decay=0.01
         )
 
-        # Assume two players in the multi-agent setting.
-        self.multi_buffer = MultiAgentBuffer(
-            env.observation_space, hypers.num_steps, hypers.num_envs,
-            experiment.device, num_players=2
-        )
+        # Initialize multi-agent buffer (one buffer per env and player)
+        self.multi_buffer = MultiAgentBuffer(experiment.device, hypers.num_envs, num_players=2)
 
         self.consecutive_invalid_batches = 0
         self.invalid_batch_threshold = 5
@@ -247,26 +248,22 @@ class Trainer:
         logger.info("Trainer initialized.")
 
     def train(self) -> None:
-        """
-        Execute the PPO training loop.
-        """
         hypers = self.hypers
         env = self.env
         device = self.experiment.device
         batch_size = hypers.num_envs * hypers.num_steps
         minibatch_size = batch_size // hypers.num_minibatches
-        num_updates = hypers.total_timesteps // batch_size  
+        num_updates = hypers.total_timesteps // batch_size
         self.start_time = time.time()
 
         logger.info("Resetting environment for training.")
         next_obs, _ = env.reset()
         next_done = torch.zeros(hypers.num_envs, dtype=torch.bool, device=device)
 
-        # Use original actor selection: always take players[:, 0, 0]
+        # Get initial actor IDs from observation
         prev_actor_ids = manabot.env.observation.get_agent_indices(next_obs)
 
         for update in range(1, num_updates + 1):
-            # Anneal learning rate if enabled.
             if hypers.anneal_lr:
                 frac = 1.0 - (update - 1) / num_updates
                 lr_now = frac * hypers.learning_rate
@@ -279,11 +276,9 @@ class Trainer:
 
             self.multi_buffer.reset()
 
-            ############################################################
-            # Rollout data collection
-            ############################################################
             logger.info("Starting rollout data collection.")
-            sef
+            wandb.log({"rollout/step": 0}, step=self.global_step)
+            # Rollout loop over hypers.num_steps steps
             for step in range(hypers.num_steps):
                 try:
                     next_obs, next_done, prev_actor_ids = self._rollout_step(next_obs, prev_actor_ids)
@@ -295,19 +290,20 @@ class Trainer:
                         raise RuntimeError(f"Failure during rollout; halting training: {e}")
                     else:
                         logger.error("Skipping faulty rollout step.")
-            
-            ############################################################
-            # Compute advantages
-            ############################################################
-            logger.info("Computing advantages for collected rollouts.")
-            obs, logprobs, actions, advantages, returns, values = self._compute_advantages(next_obs, next_done)
 
-            ############################################################
-            # PPO updates
-            ############################################################
+            # Compute bootstrap value from next_obs
+            with torch.no_grad():
+                next_value = self.agent.get_value(next_obs)  # shape: (num_envs,)
+            self.multi_buffer.compute_advantages(next_value, next_done, hypers.gamma, hypers.gae_lambda)
+            try:
+                obs, logprobs, actions, advantages, returns, values = self.multi_buffer.get_flattened()
+                logger.info(f"Flattened buffer has {logprobs.numel()} transitions.")
+            except ValueError as e:
+                logger.error(f"No valid transitions in buffers: {e}")
+                raise
+
             clipfracs = []
             approx_kl = 0.0
-
             inds = np.arange(batch_size)
             for epoch in range(hypers.update_epochs):
                 np.random.shuffle(inds)
@@ -326,7 +322,7 @@ class Trainer:
                         mb_advantages, mb_returns, mb_values
                     )
                     clipfracs.append(clip_fraction)
-                    
+
                     if update % 10 == 0:
                         self._log_system_metrics()
 
@@ -346,13 +342,12 @@ class Trainer:
             self.experiment.add_scalar("charts/SPS", sps, self.global_step)
 
             logger.info(f"Update {update}/{num_updates} | SPS: {sps} | Buffer sizes: " +
-                        f"{[buf.step_idx for buf in self.multi_buffer.buffers.values()]}")
+                        f"{[len(buf.actions_buf) for buf in self.multi_buffer.buffers.values()]}")
         env.close()
         self.experiment.close()
         logger.info("Training completed.")
 
     def save_checkpoint(self, path: str) -> None:
-        """Save the current state of the agent, optimizer, and hyperparameters."""
         torch.save({
             'agent_state_dict': self.agent.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
@@ -361,53 +356,22 @@ class Trainer:
         logger.info(f"Checkpoint saved to {path}")
 
     def load_checkpoint(self, path: str) -> None:
-        """Load the agent and optimizer state from a checkpoint."""
         checkpoint = torch.load(path, map_location=self.experiment.device)
         self.agent.load_state_dict(checkpoint['agent_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         logger.info("Checkpoint loaded. Note: TrainHypers are not automatically restored.")
 
-    def _collect_rollout(self) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor]:
-        """
-        Collect num_steps of experience from environments.
-        Returns (final_obs, final_done, final_actor_ids)
-        """
-        next_obs = self.next_obs
-        next_done = self.next_done  
-        prev_actor_ids = self.prev_actor_ids
-
-        for step in range(self.hypers.num_steps):
-            try:
-                next_obs, next_done, prev_actor_ids = self._rollout_step(next_obs, prev_actor_ids)
-                self.consecutive_invalid_batches = 0
-            except Exception as e:
-                self.consecutive_invalid_batches += 1
-                logger.error(f"Rollout step error at step {step}: {e}")
-                if self.consecutive_invalid_batches >= self.invalid_batch_threshold:
-                    raise RuntimeError(f"Failure during rollout; halting training: {e}")
-                else:
-                    logger.error("Skipping faulty rollout step.")
-
-        return next_obs, next_done, prev_actor_ids
-
-
-
     def _rollout_step(self, next_obs: Dict[str, torch.Tensor], actor_ids: torch.Tensor) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor]:
-        """
-        Execute a single rollout step in the environment.
-        """
         with torch.no_grad():
             action, logprob, _, value = self.agent.get_action_and_value(next_obs)
         try:
             new_obs, reward, done, _, info = self.env.step(action)
-            logger.debug(f"Step env.step() output: reward={reward}, done={done}")
+            logger.debug(f"env.step() output: reward={reward}, done={done}")
         except Exception as e:
             logger.error(f"env.step() failed: {e}")
             raise e
 
         self.global_step += self.hypers.num_envs
-        logger.debug(f"Global step updated to {self.global_step}")
-
         if not self._validate_obs(new_obs):
             raise RuntimeError("Invalid observation format detected; halting training.")
 
@@ -416,28 +380,12 @@ class Trainer:
         logger.info(f"Rollout step completed; new actor_ids: {new_actor_ids}")
         return new_obs, done, new_actor_ids
 
-    def _compute_advantages(self, next_obs: Dict[str, torch.Tensor], next_done: torch.Tensor) -> Tuple[
-            Dict[str, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        hypers = self.hypers
-        with torch.no_grad():
-            next_value = self.agent.get_value(next_obs)
-        logger.debug(f"Next value computed with shape: {next_value.shape}")
-
-        self.multi_buffer.compute_advantages(next_value, next_done, hypers.gamma, hypers.gae_lambda)
-        try:
-            obs, logprobs, actions, advantages, returns, values = self.multi_buffer.get_flattened()
-            logger.info(f"Flattened buffer has {logprobs.numel()} transitions.")
-        except ValueError as e:
-            logger.error(f"No valid transitions in buffers: {e}")
-            raise
-        return obs, logprobs, actions, advantages, returns, values
-
     def _optimize_step(self, obs: Dict[str, torch.Tensor],
-                         logprobs: torch.Tensor,
-                         actions: torch.Tensor,
-                         advantages: torch.Tensor,
-                         returns: torch.Tensor,
-                         values: torch.Tensor) -> Tuple[float, float]:
+                    logprobs: torch.Tensor,
+                    actions: torch.Tensor,
+                    advantages: torch.Tensor,
+                    returns: torch.Tensor,
+                    values: torch.Tensor) -> Tuple[float, float]:
         hypers = self.hypers
         _, new_logprobs, entropy, new_values = self.agent.get_action_and_value(obs, actions)
         logratio = new_logprobs - logprobs
@@ -466,6 +414,8 @@ class Trainer:
 
         with torch.no_grad():
             approx_kl = ((ratio - 1) - logratio).mean().item()
+            # Clamp the KL to be non-negative (addresses floating point precision issues)
+            approx_kl = max(approx_kl, 0.0)
             clip_fraction = (torch.abs(ratio - 1) > hypers.clip_coef).float().mean().item()
 
         self.experiment.add_scalar("losses/policy_loss", pg_loss.item(), self.global_step)
@@ -502,11 +452,11 @@ class Trainer:
                 logger.error(f"Observation shape mismatch for key {k}. Expected {expected_shape} (inside batch), got {v.shape[1:]}")
                 return False
         return True
-     
+
     def _log_system_metrics(self):
         if not self.wandb:
             return
-        
+
         metrics = {
             "system/memory_used": psutil.Process().memory_info().rss / (1024 * 1024),
             "system/cpu_percent": psutil.cpu_percent(),

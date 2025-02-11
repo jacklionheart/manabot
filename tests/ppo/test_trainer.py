@@ -53,18 +53,19 @@ def experiment(run_dir):
         exp_name="test_run",
         seed=42,
         wandb=False,
+        device="cpu",
         tensorboard=True,
         runs_dir=Path(run_dir)
     ))
 
 @pytest.fixture
-def vector_env(observation_space):
+def vector_env(observation_space, experiment):
     return VectorEnv(
         2,  # num_envs=2 for testing multi-agent scenarios
         Match(),
         observation_space,
         Reward(RewardHypers(trivial=True)),
-        device="cpu"
+        device=experiment.device
     )
 
 @pytest.fixture
@@ -121,19 +122,6 @@ class TestRolloutAndBuffer:
         assert new_actor_ids.shape == (trainer.hypers.num_envs,)
         assert torch.all((new_actor_ids >= 0) & (new_actor_ids < 2))
 
-    def test_buffer_overflow(self, trainer):
-        """Test buffer correctly handles overflow attempts."""
-        next_obs, _ = trainer.env.reset()
-        next_done = torch.zeros(trainer.hypers.num_envs, dtype=torch.bool, device=trainer.experiment.device)
-        prev_actor_ids = obs_mod.get_agent_indices(next_obs)
-        
-        # Try to overflow buffer
-        for _ in range(trainer.hypers.num_steps + 2):
-            next_obs, next_done, prev_actor_ids = trainer._rollout_step(next_obs, prev_actor_ids)
-            
-        # Verify buffers haven't overflowed
-        for buffer in trainer.multi_buffer.buffers.values():
-            assert buffer.step_idx <= trainer.hypers.num_steps
 
     def test_observation_validation(self, trainer):
         """Test observation validation with real environment data."""

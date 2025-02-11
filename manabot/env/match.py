@@ -90,11 +90,8 @@ class Reward:
             return 1.0
 
         else:
-            if new_obs.game_over:
-                # The "agent" should not change when the game is over
-                assert last_obs.agent.player_index == new_obs.agent.player_index
-                
-                if new_obs.won == new_obs.agent.player_index:
+            if new_obs.game_over:                
+                if new_obs.won == last_obs.agent.player_index:
                     return self.hypers.win_reward
                 else:
                     return self.hypers.lose_reward

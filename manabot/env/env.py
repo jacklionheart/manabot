@@ -55,6 +55,7 @@ class Env(gym.Env):
         self.match = match
         self.reward = reward
         self.auto_reset = auto_reset
+
     def reset(
         self,
         *,
@@ -116,7 +117,6 @@ class Env(gym.Env):
             if self.auto_reset:
                 # TODO: merge infos? Hopefully we remove this code soon and use gymnasium's autoreset when its released
                 cpp_obs, _ = self._cpp_env.reset(self.match.to_cpp())
-                self._last_obs = cpp_obs
                 terminated = False
                 truncated = False
         
@@ -142,7 +142,7 @@ class VectorEnv:
     and converts them to PyTorch tensors. The first dimension is always the number of 
     environments.
     """
-    def __init__(self, num_envs: int, match: Match, observation_space: ObservationSpace, reward: Reward, device: str = "cpu"):
+    def __init__(self, num_envs: int, match: Match, observation_space: ObservationSpace, reward: Reward, device: str):
         self._env = gym.vector.AsyncVectorEnv(
             [lambda: Env(match, observation_space, reward, auto_reset=True) for _ in range(num_envs)],
             shared_memory=False
@@ -152,7 +152,7 @@ class VectorEnv:
         self.num_envs = num_envs
         self.device = torch.device(device)
 
-    def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None) -> Tuple[Dict[str, torch.Tensor], Dict]:
+    def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None) -> Tuple[Dict[str, torch.Tensor], Dict[str, Any]]:
         """
         Reset all environments and return batched observations as tensors.
 
@@ -170,7 +170,7 @@ class VectorEnv:
             return val.lower() == "true"
         return bool(val)
 
-    def step(self, actions: torch.Tensor) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor, Dict]:
+    def step(self, actions: torch.Tensor) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, Any]]:
         """
         Step all environments and return batched observations and rewards as tensors.
 
@@ -180,28 +180,21 @@ class VectorEnv:
         Returns:
             observations: Dict where each value is a tensor with shape (num_envs, ...)
             rewards: Tensor of shape (num_envs,)
-            terminated: Tensor of shape (num_envs,)
-            truncated: Tensor of shape (num_envs,)
+            terminated: Tensor of shape (num_envs,) containing true termination state
+            truncated: Tensor of shape (num_envs,) containing true truncation state
             info: Dict of additional information
         """
         actions_np = actions.cpu().numpy()
         obs_tuple, rewards, terminated, truncated, info = self._env.step(actions_np)
         
-        # Create arrays of the correct shape first
-        true_terminated = np.zeros(self.num_envs, dtype=np.bool_)
-        true_truncated = np.zeros(self.num_envs, dtype=np.bool_)
+        # Get true termination states from info arrays
+        true_terminated = info.get('true_terminated', terminated)
+        true_truncated = info.get('true_truncated', truncated)
         
-        # Fill in values for each environment
-        for i, (env_info, term, trunc) in enumerate(zip(info, terminated, truncated)):
-            true_term = self._parse_bool(env_info.get('true_terminated', term))
-            true_trunc = self._parse_bool(env_info.get('true_truncated', trunc))
-            true_terminated[i] = true_term
-            true_truncated[i] = true_trunc
-        
-        # Convert to tensors
-        terminated_tensor = torch.as_tensor(true_terminated, device=self.device, dtype=torch.bool)
-        truncated_tensor = torch.as_tensor(true_truncated, device=self.device, dtype=torch.bool)
-        rewards_tensor = torch.as_tensor(rewards, device=self.device, dtype=torch.float32)
+        # Convert everything to tensors
+        rewards_tensor = torch.tensor(rewards, dtype=torch.float32).to(self.device)
+        terminated_tensor = torch.tensor(true_terminated, dtype=torch.bool).to(self.device)
+        truncated_tensor = torch.tensor(true_truncated, dtype=torch.bool).to(self.device)
         
         return (
             self._process_obs(obs_tuple),
@@ -210,7 +203,6 @@ class VectorEnv:
             truncated_tensor,
             info
         )
-
 
     def _process_obs(self, obs_tuple: Tuple[Dict[str, np.ndarray], ...]) -> Dict[str, torch.Tensor]:
         """
@@ -233,7 +225,7 @@ class VectorEnv:
         for key in keys:
             arrays = [obs[key] for obs in obs_tuple]
             stacked = np.stack(arrays)
-            batched[key] = torch.as_tensor(stacked, device=self.device, dtype=torch.float32)
+            batched[key] = torch.tensor(stacked, dtype=torch.float32).to(self.device)
             
         return batched
     
@@ -253,3 +245,4 @@ class VectorEnv:
     def close(self):
         """Close the environment."""
         self._env.close()
+

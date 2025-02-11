@@ -44,7 +44,7 @@ def reward() -> Reward:
 @pytest.fixture
 def env(sample_match, observation_space, reward) -> Env:
     """Create a fresh environment instance for each test."""
-    return Env(sample_match, observation_space, reward)
+    return Env(sample_match, observation_space, reward, auto_reset=False)
 
 @pytest.fixture
 def vector_env(sample_match, observation_space, reward) -> VectorEnv:
@@ -160,21 +160,23 @@ class TestEnvironment:
             observations, info = vector_env.reset()
             for key, tensor in observations.items():
                 assert tensor.device.type == "cuda"
-        
+        if torch.backends.mps.is_available():
+            vector_env = vector_env.to("mps")
+            observations, info = vector_env.reset()
+            for key, tensor in observations.items():
+                assert tensor.device.type == "mps"
+
         vector_env.close()
 
     def test_agent_turns_distribution(self, env):
-        """
-        Test that agent indices match between observation encoding and managym.
-        This test uses a regular (non-vectorized) Env, but converts its observations
-        to a batched format (adding a singular environment dimension) before using
-    get_agent_indices.
-        """
-        # Reset the regular Env (non-vectorized).
+        """Test that agent indices match between observation encoding and managym."""
         obs, info = env.reset()
         
-        # Convert the observation to a "vectorized" format:
-        obs_vec = {k: np.expand_dims(v, axis=0) for k, v in obs.items()}
+        # Convert the observation to a "vectorized" format using torch:
+        obs_vec = {k: torch.from_numpy(v).unsqueeze(0) for k, v in obs.items()}
+        
+        # Print shapes to understand what we're working with
+        print("obs_vec['agent_player'] shape:", obs_vec["agent_player"].shape)
         
         max_steps = 1000
         steps = 0
@@ -183,7 +185,9 @@ class TestEnvironment:
         while steps < max_steps:
             # Extract agent indices using the vectorized observation.
             actor_idx = manabot.env.observation.get_agent_indices(obs_vec)
-
+            # Get the single scalar value using item() to convert to Python int
+            actor_idx = actor_idx[0].item()
+            
             raw_obs = env.last_cpp_obs
             cpp_player_idx = raw_obs.agent.player_index
             
@@ -198,7 +202,7 @@ class TestEnvironment:
             obs, reward, done, truncated, info = env.step(0)
             
             # Re-wrap the new observation.
-            obs_vec = {k: np.expand_dims(v, axis=0) for k, v in obs.items()}
+            obs_vec = {k: torch.from_numpy(v).unsqueeze(0) for k, v in obs.items()}
             steps += 1
             
             # Check termination
@@ -209,5 +213,7 @@ class TestEnvironment:
         assert len(turn_counts) >= 2, (
             f"Expected at least 2 different agent indices, got {turn_counts}"
         )
+
+
 if __name__ == "__main__":
     pytest.main([__file__])
