@@ -11,6 +11,13 @@
     "files.exclude": {
         "build/": true,
         "__pycache__/": true,
-        ".cache": true
+        ".cache": true,
+        "managym": true
+    },
+    "search.exclude": {
+        "managym": true
+      },
+    "files.watcherExclude": {
+        "managym": true
     }
 }
