@@ -1,6 +1,9 @@
 # Use the official Python 3.12-slim image
 FROM python:3.12-slim
 
+# Enable shell debugging (optional)
+SHELL ["/bin/bash", "-ex", "-c"]
+
 # Install system build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
@@ -14,28 +17,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip && \
     rm -rf /var/lib/apt/lists/*
 
-# Install required pip packages for building (e.g. pybind11)
+# Upgrade pip and install required pip packages for building
 RUN pip install --upgrade pip pybind11
 
-# Set the working directory (adjust if needed)
+# Set the working directory for our project
 WORKDIR /manabot
 
 # Copy the full repository into the image
 COPY . /manabot
 
-# Optionally, build the C++ extension for managym.
-# (If your pyproject.toml is configured to invoke CMake automatically,
-# you might be able to skip the manual build step.)
-RUN cd managym && \
-    rm -rf build && mkdir build && cd build && \
-    cmake -DPython_ROOT_DIR=/usr/local \
-          -DPython_EXECUTABLE=/usr/local/bin/python3 \
-          -DCMAKE_PREFIX_PATH="$(python3 -c 'import pybind11; print(pybind11.get_cmake_dir())')" \
-          -G Ninja .. && \
-    ninja
+# Set an environment variable to force verbose makefile output
+ENV CMAKE_VERBOSE_MAKEFILE=ON
+ENV SKBUILD_VERBOSE=1
 
-# Install managym and the parent package (manabot) in editable mode
+# Build managym and install it using editable installs.
+# This will invoke scikit-build and run your CMakeLists.txt.
 RUN pip install -e managym
 RUN pip install -e .
 
+# Debug: List shared libraries to see what was built.
+RUN find /manabot -name "*.so" -exec echo "Found shared library: {}" \;
+
+ENV HYDRA_FULL_ERROR=1
 CMD ["python3", "manabot/scripts/train.py"]
