@@ -16,6 +16,7 @@ train:
 
 experiment:
   exp_name: "quick_train"
+  device: "cuda"
 
 hydra:
   run:
