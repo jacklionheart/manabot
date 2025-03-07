@@ -577,13 +577,23 @@ class Trainer:
     def save(self) -> None:
         assert self.wandb is not None
         path = f"{self.experiment.exp_name}_latest.pt"
+        
+        # Save model state to file
+        torch.save({
+            'model_state_dict': self.agent.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'global_step': self.global_step,
+        }, path)
+        
+        # Create and log artifact
         artifact = wandb.Artifact(
             name=path, 
             type="model",
-            description=f"Latest model",
+            description=f"Latest model at step {self.global_step}",
         )
         artifact.add_file(path)
         self.wandb.log_artifact(artifact)
+
 
 @hydra.main(version_base=None, config_path="../conf", config_name="config")
 def main(cfg: DictConfig) -> None:
