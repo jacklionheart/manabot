@@ -47,6 +47,7 @@ class ExperimentHypers:
     wandb: bool = True
     wandb_project_name: str = "manabot"
     runs_dir: Path = field(default_factory=lambda: Path.home() / "manabot-runs")
+    log_level: str = "INFO" 
 
 @dataclass
 class AgentHypers:

@@ -19,7 +19,8 @@ import wandb
 from manabot.ppo.agent import Agent
 from manabot.env import Env, Match, Reward, ObservationSpace
 from manabot.env.observation import get_agent_indices
-from manabot.infra import getLogger, MatchHypers, RewardHypers, ObservationSpaceHypers
+from manabot.infra.hypers import MatchHypers, RewardHypers, ObservationSpaceHypers
+from manabot.infra.log import getLogger
 
 logger = getLogger(__name__)
 
@@ -274,6 +275,7 @@ def evaluate_models(
     Returns:
         GameStats with results
     """
+    logger = getLogger(__name__).getChild("evaluate_models")
     # Setup
     device = next(hero_player.agent.parameters()).device if isinstance(hero_player, ModelPlayer) else "cpu"
     match_hypers = match_hypers or MatchHypers()

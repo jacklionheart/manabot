@@ -24,8 +24,7 @@ import managym
 
 from manabot.infra.hypers import ObservationSpaceHypers
 
-from manabot.infra import getLogger
-logger = getLogger(__name__)
+from manabot.infra.log import getLogger
 
 # -----------------------------------------------------------------------------
 # Game Enums - mirror managym for validation
@@ -147,7 +146,7 @@ class ObservationEncoder:
         # consistent and matches the actual array order, because
         # this is also the concatenation order.
 
-        log = logger.getChild("encode")
+        log = getLogger(__name__).getChild("encode")
 
         self.object_to_index = {}
         self.current_object_index = 0
@@ -281,6 +280,7 @@ class ObservationEncoder:
     # Actions (with focus object indices and validity masking)
     # -------------------------------------------------------------------------
     def _encode_actions(self, obs: managym.Observation) -> Tuple[np.ndarray, np.ndarray]:
+        log = getLogger(__name__).getChild("encode_actions")
         arr = np.zeros((self.max_actions, self.action_dim), dtype=np.float32)
         valid_actions = np.zeros(self.max_actions, dtype=bool)
         # We'll accumulate the focus indices for each action here.
@@ -296,7 +296,7 @@ class ObservationEncoder:
             for fid in focus_ids:
                 index = self.object_to_index.get(fid, -1)
                 if index == -1:
-                    logger.warning(f"Invalid focus object ID {fid} for action {action_type}.")
+                    log.warning(f"Invalid focus object ID {fid} for action {action_type}.")
                 indices.append(index)
             # Pad the indices to ensure we have exactly self.max_focus_objects entries.
             if len(indices) < self.max_focus_objects:

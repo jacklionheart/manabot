@@ -14,8 +14,9 @@ from typing import Optional
 import wandb
 import numpy as np
 from .hypers import ExperimentHypers, Hypers
+from manabot.infra.perf import PerformanceTracker
+import manabot.infra.log
 
-logger = logging.getLogger(__name__)
 CODE_CONTEXT_ROOT = Path(os.getenv("CODE_CONTEXT_ROOT", str(Path.home() / "src")))
 
 def flatten_config(cfg: dict, parent_key: str = '', sep: str = '/') -> dict:
@@ -44,12 +45,15 @@ class Experiment:
         self.runs_dir.mkdir(parents=True, exist_ok=True)
         self.wandb_run = None
 
+        level = getattr(logging, self.experiment_hypers.log_level.upper(), logging.INFO)
+        manabot.infra.log.LOG_LEVEL = level
+        self.logger = manabot.infra.log.getLogger(__name__)
+
         self._setup_random()
         self._setup_tracking()
 
     def _get_flattened_config(self) -> dict:
         """Convert nested hypers to flat dict for wandb."""
-        # Convert all dataclasses to dicts
         config_dict = {
             "observation": asdict(self.full_hypers.observation),
             "match": asdict(self.full_hypers.match),
@@ -58,7 +62,6 @@ class Experiment:
             "agent": asdict(self.full_hypers.agent),
             "experiment": asdict(self.full_hypers.experiment),
         }
-        # Flatten with path-like keys (e.g. "train/learning_rate")
         return flatten_config(config_dict)
 
     def _setup_tracking(self):
@@ -68,17 +71,13 @@ class Experiment:
         
         if self.wandb_on:
             try:
-                # Get flattened config for wandb
                 config = self._get_flattened_config()
-                
-                # Add some useful metadata
                 config.update({
                     "seed": self.seed,
                     "device": self.device,
                     "runs_dir": str(self.runs_dir),
                     "code_context": str(CODE_CONTEXT_ROOT),
                 })
-                
                 self.wandb_run = wandb.init(
                     project=self.wandb_project_name,
                     entity=None,
@@ -88,9 +87,9 @@ class Experiment:
                     monitor_gym=True,
                     save_code=True,
                 )
-                logger.info(f"Initialized wandb run: {run_name}")
+                self.logger.info(f"Initialized wandb run: {run_name}")
             except Exception as e:
-                logger.warning(f"Failed to initialize wandb: {e}")
+                self.logger.warning(f"Failed to initialize wandb: {e}")
                 self.wandb_on = False
 
     def log(self, metrics: dict, step: Optional[int] = None):
@@ -117,4 +116,34 @@ class Experiment:
                 wandb.finish()
                 self.wandb_run = None
             except Exception as e:
-                logger.warning(f"Error finishing wandb run: {e}")
+                self.logger.warning(f"Error finishing wandb run: {e}")
+
+    # -------------------------------------------------------------------------
+    # Performance Logging
+    # -------------------------------------------------------------------------
+    def log_performance(self, perf_tracker : PerformanceTracker, step: Optional[int] = None) -> None:
+        """
+        Logs performance metrics from a PerformanceTracker instance as separate keys.
+        Each slice is logged individually so that WandB produces distinct time-series plots.
+        """
+        if not self.wandb_on or not self.wandb_run:
+            return
+
+        perf_stats = perf_tracker.get_stats()
+        if not perf_stats:
+            return
+
+        rollout_py_pct = perf_stats.get("performance/rollout_python_pct", 0.0)
+        rollout_cpp_pct = perf_stats.get("performance/rollout_cpp_pct", 0.0)
+        advantage_pct = perf_stats.get("performance/advantage_computation_pct", 0.0)
+        gradient_pct = perf_stats.get("performance/gradient_descent_pct", 0.0)
+        other_pct = 100.0 - (rollout_py_pct + rollout_cpp_pct + advantage_pct + gradient_pct)
+
+        self.wandb_run.log({
+            **perf_stats,
+            "performance/pie_chart/Rollout_Python": rollout_py_pct,
+            "performance/pie_chart/Rollout_CPP": rollout_cpp_pct,
+            "performance/pie_chart/Advantage_Computation": advantage_pct,
+            "performance/pie_chart/Gradient_Descent": gradient_pct,
+            "performance/pie_chart/Other": other_pct,
+        }, step=step)
