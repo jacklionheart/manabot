@@ -24,13 +24,12 @@ import torch
 import torch.nn as nn
 import hydra
 
-from manabot.infra.hypers import TrainHypers
 from manabot.infra import getLogger
 import manabot.env.observation
 
-from manabot.infra import Experiment, Hypers, MatchHypers
+from manabot.infra import Experiment, Hypers, TrainHypers
 from manabot.env import ObservationSpace, VectorEnv, Match, Reward
-from manabot.ppo import Agent, Trainer
+from manabot.ppo.agent import Agent
 import manabot.infra.hypers
 
 manabot.infra.hypers.initialize()
