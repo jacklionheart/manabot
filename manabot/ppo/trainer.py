@@ -586,7 +586,7 @@ class Trainer:
         artifact.add_file(path)
         self.wandb.log_artifact(artifact)
 
-@hydra.main(version_base=None, config_path="conf", config_name="config")
+@hydra.main(version_base=None, config_path="../conf", config_name="config")
 def main(cfg: DictConfig) -> None:
     # Convert each config group to a proper Python object.
     # (If needed, these will be proper dataclass instances.)
