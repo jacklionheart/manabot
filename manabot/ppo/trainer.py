@@ -454,7 +454,7 @@ class Trainer:
                     }
                 }, step=self.global_step)
             logger.info(f"Buffer sizes: " + f"{[len(buf.actions_buf) for buf in self.multi_buffer.buffers.values()]}")
-
+            
         env.close()
         self.experiment.close()
         if self.wandb:
