@@ -18,11 +18,6 @@ python manabot/scripts/train.py
 
 Edit `manabot/scripts/conf/config.yaml` to configure the experiment.
 
-To see in tensorboard, run: (assumes `quick_train` is the experiment name in `config.yaml`)
-```bash
-tensorboard tensorboard --logdir ~/manabot-runs/quick_train
-```
-
 Current status: training runs without error, but loss is not decreasing. Still very early
 
 ### Inference

@@ -14,8 +14,7 @@ dependencies = [
     "gymnasium>=1.0.0",
     "managym>=0.1.0",
     "hydra-core>=1.3.2",
-    "wandb>=0.18.7",
-    "tensorboard>=2.18.0",
+    "wandb>=0.18.7"
 ]
 
 [project.optional-dependencies]

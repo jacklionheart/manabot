@@ -13,20 +13,28 @@ This version uses a multi-agent buffer organized as (num_envs x num_players) que
 """
 
 from collections import defaultdict
-import time
+from omegaconf import DictConfig, OmegaConf
 from typing import Dict, Tuple, List
+import time
+import wandb
+
 import numpy as np
 import psutil
 import torch
 import torch.nn as nn
-import wandb
+import hydra
 
-from manabot.ppo.agent import Agent
-from manabot.infra.experiment import Experiment
 from manabot.infra.hypers import TrainHypers
-from manabot.env import VectorEnv
 from manabot.infra import getLogger
 import manabot.env.observation
+
+from manabot.infra import Experiment, Hypers, MatchHypers
+from manabot.env import ObservationSpace, VectorEnv, Match, Reward
+from manabot.ppo import Agent, Trainer
+import manabot.infra.hypers
+
+manabot.infra.hypers.initialize()
+
 
 logger = getLogger(__name__)
 
@@ -86,9 +94,9 @@ class PPOBuffer:
         self.advantages = advantages
         self.returns = advantages + self.values
 
-
     def reset(self):
         # Clear the stored lists.
+        from collections import defaultdict
         self.obs_buff = defaultdict(list)
         self.actions_buf = []
         self.logprobs_buf = []
@@ -104,7 +112,6 @@ class PPOBuffer:
 
         self.advantages = None
         self.returns = None
-
 
 class MultiAgentBuffer:
     """
@@ -201,6 +208,61 @@ class MultiAgentBuffer:
             buf.reset()
 
 # -----------------------------------------------------------------------------
+# Performance Tracking
+# -----------------------------------------------------------------------------
+
+class PerformanceTracker:
+    """Tracks timing information across different sections of the training process."""
+    
+    def __init__(self):
+        self.timers = {
+            "rollout_python": 0.0,  # Time spent in Python rollout logic
+            "rollout_cpp": 0.0,     # Time spent in managym C++ env
+            "advantage_computation": 0.0,  # Time spent computing advantages
+            "gradient_descent": 0.0,   # Time spent in optimizer steps
+            "total_update": 0.0,    # Total time for the update
+        }
+        self.counts = defaultdict(int)
+        self.start_times = {}
+        
+    def start(self, section):
+        """Start timing a particular section."""
+        self.start_times[section] = time.time()
+        
+    def stop(self, section):
+        """Stop timing a section and record the elapsed time."""
+        if section in self.start_times:
+            elapsed = time.time() - self.start_times[section]
+            self.timers[section] += elapsed
+            self.counts[section] += 1
+            del self.start_times[section]
+            return elapsed
+        return 0
+    
+    def reset(self):
+        """Reset all timers."""
+        for key in self.timers:
+            self.timers[key] = 0.0
+        self.counts = defaultdict(int)
+        self.start_times = {}
+        
+    def get_stats(self):
+        """Get statistics about timing information."""
+        total = self.timers["total_update"]
+        if total <= 0:
+            return {}
+        
+        stats = {}
+        for section, elapsed in self.timers.items():
+            if section != "total_update":
+                stats[f"performance/{section}_pct"] = (elapsed / total) * 100
+                stats[f"performance/{section}_time"] = elapsed
+                if self.counts[section] > 0:
+                    stats[f"performance/{section}_avg"] = elapsed / self.counts[section]
+                    
+        return stats
+
+# -----------------------------------------------------------------------------
 # Trainer Class
 # -----------------------------------------------------------------------------
 
@@ -239,6 +301,9 @@ class Trainer:
 
         self.wandb = self.experiment.wandb_run
 
+        # Initialize performance tracker
+        self.perf_tracker = PerformanceTracker()
+
         if self.wandb:
             self.wandb.summary.update({
                 "max_episode_return": float("-inf"),
@@ -264,6 +329,9 @@ class Trainer:
         prev_actor_ids = manabot.env.observation.get_agent_indices(next_obs)
 
         for update in range(1, num_updates + 1):
+            # Start timing for the total update
+            self.perf_tracker.start("total_update")
+            
             if hypers.anneal_lr:
                 frac = 1.0 - (update - 1) / num_updates
                 lr_now = frac * hypers.learning_rate
@@ -275,10 +343,13 @@ class Trainer:
                 logger.info(f"Update {update}: LR = {current_lr}")
 
             self.multi_buffer.reset()
+            self.perf_tracker.reset()
 
             logger.info("Starting rollout data collection.")
             wandb.log({"rollout/step": 0}, step=self.global_step)
+            
             # Rollout loop over hypers.num_steps steps
+            self.perf_tracker.start("rollout_python")
             for step in range(hypers.num_steps):
                 try:
                     next_obs, next_done, prev_actor_ids = self._rollout_step(next_obs, prev_actor_ids)
@@ -290,21 +361,29 @@ class Trainer:
                         raise RuntimeError(f"Failure during rollout; halting training: {e}")
                     else:
                         logger.error("Skipping faulty rollout step.")
+            rollout_python_time = self.perf_tracker.stop("rollout_python")
+            logger.info(f"Rollout collection completed in {rollout_python_time:.2f}s")
 
             # Compute bootstrap value from next_obs
+            self.perf_tracker.start("advantage_computation")
             with torch.no_grad():
                 next_value = self.agent.get_value(next_obs)  # shape: (num_envs,)
             self.multi_buffer.compute_advantages(next_value, next_done, hypers.gamma, hypers.gae_lambda)
+            
             try:
                 obs, logprobs, actions, advantages, returns, values = self.multi_buffer.get_flattened()
                 logger.info(f"Flattened buffer has {logprobs.numel()} transitions.")
             except ValueError as e:
                 logger.error(f"No valid transitions in buffers: {e}")
                 raise
+            advantage_computation_time = self.perf_tracker.stop("advantage_computation")
+            logger.info(f"Advantage computation completed in {advantage_computation_time:.2f}s")
 
             clipfracs = []
             approx_kl = 0.0
             inds = np.arange(batch_size)
+            
+            self.perf_tracker.start("gradient_descent")
             for epoch in range(hypers.update_epochs):
                 np.random.shuffle(inds)
                 for start in range(0, batch_size, minibatch_size):
@@ -329,44 +408,70 @@ class Trainer:
                     if hypers.target_kl != float("inf") and approx_kl > hypers.target_kl:
                         logger.info(f"Early stopping at epoch {epoch} due to KL divergence {approx_kl:.4f}")
                         break
+            gradient_descent_time = self.perf_tracker.stop("gradient_descent")
+            logger.info(f"Gradient descent completed in {gradient_descent_time:.2f}s")
 
             with torch.no_grad():
                 y_pred, y_true = values.cpu().numpy(), returns.cpu().numpy()
             var_y = np.var(y_true)
             explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
-            self.experiment.add_scalar("charts/learning_rate", 
-                                       self.optimizer.param_groups[0]["lr"], self.global_step)
-            self.experiment.add_scalar("losses/explained_variance", explained_var, self.global_step)
             sps = int(self.global_step / (time.time() - self.start_time))
-            self.experiment.add_scalar("charts/SPS", sps, self.global_step)
+            if self.wandb:
+                self.wandb.log({
+                    "charts/learning_rate": self.optimizer.param_groups[0]["lr"],
+                    "losses/explained_variance": explained_var,
+                    "charts/SPS": sps
+                }, step=self.global_step)
+            
+            # Stop overall update timer and log performance metrics
+            total_update_time = self.perf_tracker.stop("total_update")
+            perf_stats = self.perf_tracker.get_stats()
+            if self.wandb:
+                self.wandb.log(perf_stats, step=self.global_step)
+            
+            # Log performance information
+            rollout_py_pct = perf_stats.get('performance/rollout_python_pct', 0)
+            rollout_cpp_pct = perf_stats.get('performance/rollout_cpp_pct', 0)
+            advantage_pct = perf_stats.get('performance/advantage_computation_pct', 0)
+            gradient_pct = perf_stats.get('performance/gradient_descent_pct', 0)
+            
+            logger.info(f"Update {update}/{num_updates} | SPS: {sps} | Total time: {total_update_time:.2f}s")
+            logger.info(f"Performance breakdown: "
+                        f"Rollout (Python): {rollout_py_pct:.1f}% | "
+                        f"Rollout (C++): {rollout_cpp_pct:.1f}% | "
+                        f"Advantage: {advantage_pct:.1f}% | "
+                        f"Gradient: {gradient_pct:.1f}%")
+                        
+            # Add performance pie chart data to wandb
+            if self.wandb:
+                self.wandb.log({
+                    "performance/pie_chart": {
+                        "Rollout (Python)": rollout_py_pct - rollout_cpp_pct,  # Python overhead
+                        "Rollout (C++)": rollout_cpp_pct,
+                        "Advantage Computation": advantage_pct,
+                        "Gradient Descent": gradient_pct,
+                        "Other": 100 - (rollout_py_pct + advantage_pct + gradient_pct)
+                    }
+                }, step=self.global_step)
+            logger.info(f"Buffer sizes: " + f"{[len(buf.actions_buf) for buf in self.multi_buffer.buffers.values()]}")
 
-            logger.info(f"Update {update}/{num_updates} | SPS: {sps} | Buffer sizes: " +
-                        f"{[len(buf.actions_buf) for buf in self.multi_buffer.buffers.values()]}")
         env.close()
         self.experiment.close()
+        if self.wandb:
+            self.save()
         logger.info("Training completed.")
-
-    def save_checkpoint(self, path: str) -> None:
-        torch.save({
-            'agent_state_dict': self.agent.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'train_hypers': self.hypers,
-        }, path)
-        logger.info(f"Checkpoint saved to {path}")
-
-    def load_checkpoint(self, path: str) -> None:
-        checkpoint = torch.load(path, map_location=self.experiment.device)
-        self.agent.load_state_dict(checkpoint['agent_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        logger.info("Checkpoint loaded. Note: TrainHypers are not automatically restored.")
 
     def _rollout_step(self, next_obs: Dict[str, torch.Tensor], actor_ids: torch.Tensor) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor]:
         with torch.no_grad():
             action, logprob, _, value = self.agent.get_action_and_value(next_obs)
+        
         try:
+            # Start timer for C++ environment step
+            self.perf_tracker.start("rollout_cpp")
             new_obs, reward, done, _, info = self.env.step(action)
-            logger.debug(f"env.step() output: reward={reward}, done={done}")
+            cpp_time = self.perf_tracker.stop("rollout_cpp")
+            logger.debug(f"env.step() took {cpp_time:.4f}s, output: reward={reward}, done={done}")
         except Exception as e:
             logger.error(f"env.step() failed: {e}")
             raise e
@@ -377,7 +482,7 @@ class Trainer:
 
         self.multi_buffer.store(next_obs, action, reward, value, logprob, done, actor_ids)
         new_actor_ids = manabot.env.observation.get_agent_indices(new_obs)
-        logger.info(f"Rollout step completed; new actor_ids: {new_actor_ids}")
+        logger.debug(f"Rollout step completed; new actor_ids: {new_actor_ids}")
         return new_obs, done, new_actor_ids
 
     def _optimize_step(self, obs: Dict[str, torch.Tensor],
@@ -418,14 +523,13 @@ class Trainer:
             approx_kl = max(approx_kl, 0.0)
             clip_fraction = (torch.abs(ratio - 1) > hypers.clip_coef).float().mean().item()
 
-        self.experiment.add_scalar("losses/policy_loss", pg_loss.item(), self.global_step)
-        self.experiment.add_scalar("losses/value_loss", v_loss.item(), self.global_step)
-        self.experiment.add_scalar("losses/entropy", entropy_loss.item(), self.global_step)
-        self.experiment.add_scalar("losses/approx_kl", approx_kl, self.global_step)
-        self.experiment.add_scalar("losses/clip_fraction", clip_fraction, self.global_step)
-
         if self.wandb:
             self.wandb.log({
+                "losses/policy_loss": pg_loss.item(),
+                "losses/value_loss": v_loss.item(),
+                "losses/entropy": entropy_loss.item(),
+                "losses/approx_kl": approx_kl,
+                "losses/clip_fraction": clip_fraction,
                 "ppo/losses": {
                     "policy": pg_loss.item(),
                     "value": v_loss.item(),
@@ -469,4 +573,52 @@ class Trainer:
                 "system/gpu_memory_reserved": torch.cuda.memory_reserved() / (1024 * 1024)
             })
         wandb.log(metrics, step=self.global_step)
-        logger.info(f"Logged system metrics: {metrics}")
+        logger.debug(f"Logged system metrics: {metrics}")
+
+    def save(self) -> None:
+        assert self.wandb is not None
+        path = f"{self.experiment.exp_name}_latest.pt"
+        artifact = wandb.Artifact(
+            name=path, 
+            type="model",
+            description=f"Latest model",
+        )
+        artifact.add_file(path)
+        self.wandb.log_artifact(artifact)
+
+@hydra.main(version_base=None, config_path="conf", config_name="config")
+def main(cfg: DictConfig) -> None:
+    # Convert each config group to a proper Python object.
+    # (If needed, these will be proper dataclass instances.)
+    obs_config = OmegaConf.to_object(cfg.observation)
+    train_config = OmegaConf.to_object(cfg.train)
+    reward_config = OmegaConf.to_object(cfg.reward)
+    agent_config = OmegaConf.to_object(cfg.agent)
+    experiment_config = OmegaConf.to_object(cfg.experiment)
+    match_config = OmegaConf.to_object(cfg.match)
+    # Create the top-level hypers instance, now with match as a dataclass.
+    hypers = Hypers(
+        observation=obs_config,
+        match=match_config,
+        train=train_config,
+        reward=reward_config,
+        agent=agent_config,
+        experiment=experiment_config
+    )
+    
+    # Setup components
+    experiment = Experiment(hypers.experiment, hypers)
+    observation_space = ObservationSpace(hypers.observation)
+    match = Match(hypers.match)
+    reward = Reward(hypers.reward)
+    
+    # Create environment and agent
+    env = VectorEnv(hypers.train.num_envs, match, observation_space, reward, device=experiment.device)
+    agent = Agent(observation_space, hypers.agent)
+    
+    # Train
+    trainer = Trainer(agent, experiment, env, hypers.train)
+    trainer.train()
+
+if __name__ == "__main__":
+    main()

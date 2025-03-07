@@ -10,9 +10,9 @@ from pathlib import Path
 import random
 from dataclasses import asdict
 import torch
+from typing import Optional
 import wandb
 import numpy as np
-from torch.utils.tensorboard.writer import SummaryWriter
 from .hypers import ExperimentHypers, Hypers
 
 logger = logging.getLogger(__name__)
@@ -39,11 +39,9 @@ class Experiment:
         self.torch_deterministic = experiment_hypers.torch_deterministic
         self.device = experiment_hypers.device
         self.wandb_on = experiment_hypers.wandb
-        self.tensorboard_on = experiment_hypers.tensorboard       
         self.wandb_project_name = experiment_hypers.wandb_project_name
         self.runs_dir = self.experiment_hypers.runs_dir / self.exp_name
         self.runs_dir.mkdir(parents=True, exist_ok=True)
-        self.summary_writer = None
         self.wandb_run = None
 
         self._setup_random()
@@ -64,7 +62,7 @@ class Experiment:
         return flatten_config(config_dict)
 
     def _setup_tracking(self):
-        """Setup experiment tracking with wandb and tensorboard."""
+        """Setup experiment tracking with wandb."""
         run_name = f"{self.exp_name}__{self.seed}__{int(time.time())}"
         run_dir = self.runs_dir / run_name
         
@@ -87,7 +85,6 @@ class Experiment:
                     name=run_name,
                     dir=str(self.runs_dir),
                     config=config,
-                    sync_tensorboard=True,
                     monitor_gym=True,
                     save_code=True,
                 )
@@ -95,14 +92,16 @@ class Experiment:
             except Exception as e:
                 logger.warning(f"Failed to initialize wandb: {e}")
                 self.wandb_on = False
-        
-        if self.tensorboard_on:
-            self.summary_writer = SummaryWriter(str(run_dir))
 
+    def log(self, metrics: dict, step: Optional[int] = None):
+        """Log metrics to wandb."""
+        if self.wandb_on and self.wandb_run:
+            self.wandb_run.log(metrics, step=step)
+    
     def add_scalar(self, tag: str, value, step: int):
-        """Write a value to tensorboard."""
-        if self.summary_writer:
-            self.summary_writer.add_scalar(tag, value, step)
+        """Compatibility method for tensorboard-style logging, now uses wandb."""
+        if self.wandb_on and self.wandb_run:
+            self.wandb_run.log({tag: value}, step=step)
 
     def _setup_random(self):
         """Setup random number generators."""
@@ -112,11 +111,7 @@ class Experiment:
         torch.backends.cudnn.deterministic = self.torch_deterministic
 
     def close(self):
-        """Cleanup wandb and tensorboard resources."""
-        if self.summary_writer:
-            self.summary_writer.close()
-            self.summary_writer = None
-        
+        """Cleanup wandb resources."""
         if self.wandb_on and self.wandb_run:
             try:
                 wandb.finish()

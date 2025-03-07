@@ -45,7 +45,6 @@ class ExperimentHypers:
     torch_deterministic: bool = True
     device: str = "cpu"
     wandb: bool = True
-    tensorboard: bool = True
     wandb_project_name: str = "manabot"
     runs_dir: Path = field(default_factory=lambda: Path.home() / "manabot-runs")
 
