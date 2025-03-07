@@ -44,7 +44,7 @@ class Experiment:
         self.runs_dir = self.experiment_hypers.runs_dir / self.exp_name
         self.runs_dir.mkdir(parents=True, exist_ok=True)
         self.wandb_run = None
-
+        self.perf_tracker = PerformanceTracker()
         level = getattr(logging, self.experiment_hypers.log_level.upper(), logging.INFO)
         manabot.infra.log.LOG_LEVEL = level
         self.logger = manabot.infra.log.getLogger(__name__)
@@ -121,29 +121,23 @@ class Experiment:
     # -------------------------------------------------------------------------
     # Performance Logging
     # -------------------------------------------------------------------------
-    def log_performance(self, perf_tracker : PerformanceTracker, step: Optional[int] = None) -> None:
+    def log_performance(self, step: Optional[int] = None) -> None:
         """
-        Logs performance metrics from a PerformanceTracker instance as separate keys.
-        Each slice is logged individually so that WandB produces distinct time-series plots.
+        Logs hierarchical performance metrics. For each node in the hierarchy,
+        logs the total time spent, its percentage of the parent's time, and its
+        percentage of the overall (root) time. The keys are prefixed with
+        'hierarchical/'.
         """
         if not self.wandb_on or not self.wandb_run:
             return
 
-        perf_stats = perf_tracker.get_stats()
-        if not perf_stats:
-            return
+        perf_stats = self.perf_tracker.get_stats()
 
-        rollout_py_pct = perf_stats.get("performance/rollout_python_pct", 0.0)
-        rollout_cpp_pct = perf_stats.get("performance/rollout_cpp_pct", 0.0)
-        advantage_pct = perf_stats.get("performance/advantage_computation_pct", 0.0)
-        gradient_pct = perf_stats.get("performance/gradient_descent_pct", 0.0)
-        other_pct = 100.0 - (rollout_py_pct + rollout_cpp_pct + advantage_pct + gradient_pct)
+        log_dict = {}
+        for node_path, data in perf_stats.items():
+            log_dict[f"performance/{node_path}/total_time"] = data["total_time"]
+            log_dict[f"performance/{node_path}/pct_of_parent"] = data["pct_of_parent"]
+            log_dict[f"performance/{node_path}/pct_of_total"] = data["pct_of_total"]
 
-        self.wandb_run.log({
-            **perf_stats,
-            "performance/pie_chart/Rollout_Python": rollout_py_pct,
-            "performance/pie_chart/Rollout_CPP": rollout_cpp_pct,
-            "performance/pie_chart/Advantage_Computation": advantage_pct,
-            "performance/pie_chart/Gradient_Descent": gradient_pct,
-            "performance/pie_chart/Other": other_pct,
-        }, step=step)
+        self.wandb_run.log(log_dict, step=step)
+        self.logger.info(f"Performance stats: {log_dict}")

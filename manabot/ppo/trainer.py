@@ -238,8 +238,7 @@ class Trainer:
         self.invalid_batch_threshold = 5
         self.wandb = self.experiment.wandb_run
 
-        # Use the shared PerformanceTracker from infra/performance.py
-        self.perf_tracker = PerformanceTracker()
+        self.perf_tracker = self.experiment.perf_tracker
 
         if self.wandb:
             self.wandb.summary.update({
@@ -250,6 +249,7 @@ class Trainer:
         self.logger.info("Trainer initialized.")
 
     def train(self) -> None:
+        self.perf_tracker.startRoot()
         hypers = self.hypers
         env = self.env
         device = self.experiment.device
@@ -264,7 +264,6 @@ class Trainer:
 
         prev_actor_ids = manabot.env.observation.get_agent_indices(next_obs)
 
-        self.perf_tracker.start("train")
         for update in range(1, num_updates + 1):
             if hypers.anneal_lr:
                 frac = 1.0 - (update - 1) / num_updates
@@ -281,12 +280,8 @@ class Trainer:
             self.logger.info("Starting rollout data collection.")
             wandb.log({"rollout/step": 0}, step=self.global_step)
             
-            
-            # Rollout loop over hypers.num_steps steps
-
-            # Rollout loop over hypers.num_steps steps
-            self.perf_tracker.start("train/rollout")
-            self.perf_tracker.start("train/rollout/step")
+            self.perf_tracker.start("rollout")
+            self.perf_tracker.start("rollout/step")
             for step in range(hypers.num_steps):
                 try:
                     next_obs, next_done, prev_actor_ids = self._rollout_step(next_obs, prev_actor_ids)
@@ -298,9 +293,9 @@ class Trainer:
                         raise RuntimeError(f"Failure during rollout; halting training: {e}")
                     else:
                         self.logger.error("Skipping faulty rollout step.")
-            self.perf_tracker.start("train/rollout/step")
+            self.perf_tracker.stop("rollout/step")
 
-            self.perf_tracker.start("train/rollout/advantage")
+            self.perf_tracker.start("rollout/advantage")
             with torch.no_grad():
                 next_value = self.agent.get_value(next_obs)
             self.multi_buffer.compute_advantages(next_value, next_done,
@@ -312,15 +307,15 @@ class Trainer:
             except ValueError as e:
                 self.logger.error(f"No valid transitions in buffers: {e}")
                 raise
-            self.perf_tracker.stop("train/rollout/advantage")
-            self.perf_tracker.stop("train/rollout")
+            self.perf_tracker.stop("rollout/advantage")
+            self.perf_tracker.stop("rollout")
 
 
             clipfracs = []
             approx_kl = 0.0
             inds = np.arange(batch_size)
 
-            self.perf_tracker.start("train/gradient")
+            self.perf_tracker.start("gradient")
             for epoch in range(hypers.update_epochs):
                 np.random.shuffle(inds)
                 for start in range(0, batch_size, minibatch_size):
@@ -345,7 +340,7 @@ class Trainer:
                     if hypers.target_kl != float("inf") and approx_kl > hypers.target_kl:
                         self.logger.info(f"Early stopping at epoch {epoch} due to KL divergence {approx_kl:.4f}")
                         break
-            self.perf_tracker.stop("train/gradient")
+            self.perf_tracker.stop("gradient")
 
             with torch.no_grad():
                 y_pred, y_true = values.cpu().numpy(), returns.cpu().numpy()
@@ -361,24 +356,11 @@ class Trainer:
                 }, step=self.global_step)
             
             
-            self.experiment.log_performance(self.perf_tracker, step=self.global_step)
+            self.experiment.log_performance(step=self.global_step)
 
-            perf_stats = self.perf_tracker.get_stats()
-            rollout_py_pct = perf_stats.get('performance/rollout_python_pct', 0)
-            rollout_cpp_pct = perf_stats.get('performance/rollout_cpp_pct', 0)
-            advantage_pct = perf_stats.get('performance/advantage_computation_pct', 0)
-            gradient_pct = perf_stats.get('performance/gradient_descent_pct', 0)
             time_since_start = time.time() - self.start_time
-
             self.logger.info(
                 f"Update {update}/{num_updates} | SPS: {sps} | Total time: {time_since_start:.2f}s"
-            )
-            self.logger.info(
-                f"Performance breakdown: "
-                f"Rollout (Python): {rollout_py_pct:.1f}% | "
-                f"Rollout (C++): {rollout_cpp_pct:.1f}% | "
-                f"Advantage: {advantage_pct:.1f}% | "
-                f"Gradient: {gradient_pct:.1f}%"
             )
 
             self.logger.info(f"Buffer sizes: {[len(buf.actions_buf) for buf in self.multi_buffer.buffers.values()]}")
@@ -397,10 +379,9 @@ class Trainer:
             action, logprob, _, value = self.agent.get_action_and_value(next_obs)
 
         try:
-            self.perf_tracker.start("train/rollout/step/env")
+            self.perf_tracker.start("rollout/step/env")
             new_obs, reward, done, _, info = self.env.step(action)
-            cpp_time = self.perf_tracker.stop("train/rollout/step/env")
-            self.logger.debug(f"env.step() took {cpp_time:.4f}s, output: reward={reward}, done={done}")
+            self.perf_tracker.stop("rollout/step/env")
         except Exception as e:
             self.logger.error(f"env.step() failed: {e}")
             raise e
