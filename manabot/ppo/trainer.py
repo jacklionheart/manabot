@@ -456,9 +456,10 @@ class Trainer:
             logger.info(f"Buffer sizes: " + f"{[len(buf.actions_buf) for buf in self.multi_buffer.buffers.values()]}")
             
         env.close()
-        self.experiment.close()
         if self.wandb:
             self.save()
+        self.experiment.close()
+
         logger.info("Training completed.")
 
     def _rollout_step(self, next_obs: Dict[str, torch.Tensor], actor_ids: torch.Tensor) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor]:
