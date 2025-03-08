@@ -44,7 +44,7 @@ class Experiment:
         self.runs_dir = self.experiment_hypers.runs_dir / self.exp_name
         self.runs_dir.mkdir(parents=True, exist_ok=True)
         self.wandb_run = None
-        self.profiler = Profiler()
+        self.profiler = Profiler(enabled=experiment_hypers.profiler_enabled)
         level = getattr(logging, self.experiment_hypers.log_level.upper(), logging.INFO)
         manabot.infra.log.LOG_LEVEL = level
         self.logger = manabot.infra.log.getLogger(__name__)
@@ -129,14 +129,13 @@ class Experiment:
         'hierarchical/'.
         """
         if not self.wandb_on or not self.wandb_run:
+            self.logger.warning("Wandb not initialized, skipping performance logging")
             return
 
         perf_stats = self.profiler.get_stats()
 
         log_dict = {}
         for node_path, data in perf_stats.items():
-            log_dict[f"performance/{node_path}/total_time"] = data["total_time"]
-            log_dict[f"performance/{node_path}/pct_of_parent"] = data["pct_of_parent"]
             log_dict[f"performance/{node_path}/pct_of_total"] = data["pct_of_total"]
 
         self.wandb_run.log(log_dict, step=step)

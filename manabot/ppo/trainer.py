@@ -30,7 +30,7 @@ from manabot.env import ObservationSpace, VectorEnv, Match, Reward
 from manabot.ppo.agent import Agent
 import manabot.infra.hypers
 
-from manabot.infra.profiler import PerformanceTracker
+from manabot.infra.profiler import Profiler
 
 manabot.infra.hypers.initialize()
 
@@ -238,8 +238,9 @@ class Trainer:
         self.invalid_batch_threshold = 5
         self.wandb = self.experiment.wandb_run
 
+        # Initialize the profiler
         self.profiler = self.experiment.profiler
-
+        
         if self.wandb:
             self.wandb.summary.update({
                 "max_episode_return": float("-inf"),
@@ -249,127 +250,123 @@ class Trainer:
         self.logger.info("Trainer initialized.")
 
     def train(self) -> None:
-        self.profiler.start_root()
-        hypers = self.hypers
-        env = self.env
-        device = self.experiment.device
-        batch_size = hypers.num_envs * hypers.num_steps
-        minibatch_size = batch_size // hypers.num_minibatches
-        num_updates = hypers.total_timesteps // batch_size
-        self.start_time = time.time()
+        # Use context manager for root timer
+        with self.profiler.track("train"):
+            hypers = self.hypers
+            env = self.env
+            device = self.experiment.device
+            batch_size = hypers.num_envs * hypers.num_steps
+            minibatch_size = batch_size // hypers.num_minibatches
+            num_updates = hypers.total_timesteps // batch_size
+            self.start_time = time.time()
 
-        self.logger.info("Resetting environment for training.")
-        next_obs, _ = env.reset()
-        next_done = torch.zeros(hypers.num_envs, dtype=torch.bool, device=device)
+            self.logger.info("Resetting environment for training.")
+            next_obs, _ = env.reset()
+            next_done = torch.zeros(hypers.num_envs, dtype=torch.bool, device=device)
 
-        prev_actor_ids = manabot.env.observation.get_agent_indices(next_obs)
+            prev_actor_ids = manabot.env.observation.get_agent_indices(next_obs)
 
-        for update in range(1, num_updates + 1):
-            if hypers.anneal_lr:
-                frac = 1.0 - (update - 1) / num_updates
-                lr_now = frac * hypers.learning_rate
-                for param_group in self.optimizer.param_groups:
-                    param_group["lr"] = lr_now
-                self.logger.info(f"Update {update}: Annealed LR set to {lr_now}")
-            else:
-                current_lr = self.optimizer.param_groups[0]["lr"]
-                self.logger.info(f"Update {update}: LR = {current_lr}")
+            for update in range(1, num_updates + 1):
+                if hypers.anneal_lr:
+                    frac = 1.0 - (update - 1) / num_updates
+                    lr_now = frac * hypers.learning_rate
+                    for param_group in self.optimizer.param_groups:
+                        param_group["lr"] = lr_now
+                    self.logger.info(f"Update {update}: Annealed LR set to {lr_now}")
+                else:
+                    current_lr = self.optimizer.param_groups[0]["lr"]
+                    self.logger.info(f"Update {update}: LR = {current_lr}")
 
-            self.multi_buffer.reset()
+                self.multi_buffer.reset()
 
-            self.logger.info("Starting rollout data collection.")
-            wandb.log({"rollout/step": 0}, step=self.global_step)
-            
-            self.profiler.start("rollout")
-            self.profiler.start("rollout/step")
-            for step in range(hypers.num_steps):
-                try:
-                    next_obs, next_done, prev_actor_ids = self._rollout_step(next_obs, prev_actor_ids)
-                    self.consecutive_invalid_batches = 0
-                except Exception as e:
-                    self.consecutive_invalid_batches += 1
-                    self.logger.error(f"Rollout step error at step {step}: {e}")
-                    if self.consecutive_invalid_batches >= self.invalid_batch_threshold:
-                        raise RuntimeError(f"Failure during rollout; halting training: {e}")
-                    else:
-                        self.logger.error("Skipping faulty rollout step.")
-            self.profiler.stop("rollout/step")
+                self.logger.info("Starting rollout data collection.")
+                wandb.log({"rollout/step": 0}, step=self.global_step)
+                
+                with self.profiler.track("rollout"):
+                    with self.profiler.track("step"):
+                        for step in range(hypers.num_steps):
+                            try:
+                                next_obs, next_done, prev_actor_ids = self._rollout_step(next_obs, prev_actor_ids)
+                                self.consecutive_invalid_batches = 0
+                            except Exception as e:
+                                self.consecutive_invalid_batches += 1
+                                self.logger.error(f"Rollout step error at step {step}: {e}")
+                                if self.consecutive_invalid_batches >= self.invalid_batch_threshold:
+                                    raise RuntimeError(f"Failure during rollout; halting training: {e}")
+                                else:
+                                    self.logger.error("Skipping faulty rollout step.")
+                    
+                    with self.profiler.track("advantage"):
+                        with torch.no_grad():
+                            next_value = self.agent.get_value(next_obs)
+                        self.multi_buffer.compute_advantages(next_value, next_done,
+                                                            hypers.gamma, hypers.gae_lambda)
 
-            self.profiler.start("rollout/advantage")
-            with torch.no_grad():
-                next_value = self.agent.get_value(next_obs)
-            self.multi_buffer.compute_advantages(next_value, next_done,
-                                                 hypers.gamma, hypers.gae_lambda)
+                        try:
+                            obs, logprobs, actions, advantages, returns, values = self.multi_buffer.get_flattened()
+                            self.logger.info(f"Flattened buffer has {logprobs.numel()} transitions.")
+                        except ValueError as e:
+                            self.logger.error(f"No valid transitions in buffers: {e}")
+                            raise
 
-            try:
-                obs, logprobs, actions, advantages, returns, values = self.multi_buffer.get_flattened()
-                self.logger.info(f"Flattened buffer has {logprobs.numel()} transitions.")
-            except ValueError as e:
-                self.logger.error(f"No valid transitions in buffers: {e}")
-                raise
-            self.profiler.stop("rollout/advantage")
-            self.profiler.stop("rollout")
+                clipfracs = []
+                approx_kl = 0.0
+                inds = np.arange(batch_size)
+
+                with self.profiler.track("gradient"):
+                    for epoch in range(hypers.update_epochs):
+                        np.random.shuffle(inds)
+                        for start in range(0, batch_size, minibatch_size):
+                            end = start + minibatch_size
+                            mb_inds = inds[start:end]
+                            mb_obs = {k: v[mb_inds] for k, v in obs.items()}
+                            mb_old_logprobs = logprobs[mb_inds]
+                            mb_actions = actions[mb_inds]
+                            mb_advantages = advantages[mb_inds]
+                            mb_returns = returns[mb_inds]
+                            mb_values = values[mb_inds]
+
+                            approx_kl, clip_fraction = self._optimize_step(
+                                mb_obs, mb_old_logprobs, mb_actions,
+                                mb_advantages, mb_returns, mb_values
+                            )
+                            clipfracs.append(clip_fraction)
+
+                            if update % 10 == 0:
+                                self._log_system_metrics()
+
+                            if hypers.target_kl != float("inf") and approx_kl > hypers.target_kl:
+                                self.logger.info(f"Early stopping at epoch {epoch} due to KL divergence {approx_kl:.4f}")
+                                break
 
 
-            clipfracs = []
-            approx_kl = 0.0
-            inds = np.arange(batch_size)
+                with torch.no_grad():
+                    y_pred, y_true = values.cpu().numpy(), returns.cpu().numpy()
+                var_y = np.var(y_true)
+                explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
-            self.profiler.start("gradient")
-            for epoch in range(hypers.update_epochs):
-                np.random.shuffle(inds)
-                for start in range(0, batch_size, minibatch_size):
-                    end = start + minibatch_size
-                    mb_inds = inds[start:end]
-                    mb_obs = {k: v[mb_inds] for k, v in obs.items()}
-                    mb_old_logprobs = logprobs[mb_inds]
-                    mb_actions = actions[mb_inds]
-                    mb_advantages = advantages[mb_inds]
-                    mb_returns = returns[mb_inds]
-                    mb_values = values[mb_inds]
+                sps = int(self.global_step / (time.time() - self.start_time))
+                if self.wandb:
+                    self.wandb.log({
+                        "charts/learning_rate": self.optimizer.param_groups[0]["lr"],
+                        "losses/explained_variance": explained_var,
+                        "charts/SPS": sps
+                    }, step=self.global_step)
+                
+                self.experiment.log_performance(step=self.global_step)
 
-                    approx_kl, clip_fraction = self._optimize_step(
-                        mb_obs, mb_old_logprobs, mb_actions,
-                        mb_advantages, mb_returns, mb_values
-                    )
-                    clipfracs.append(clip_fraction)
+                time_since_start = time.time() - self.start_time
+                self.logger.info(
+                    f"Update {update}/{num_updates} | SPS: {sps} | Total time: {time_since_start:.2f}s"
+                )
 
-                    if update % 10 == 0:
-                        self._log_system_metrics()
+                self.logger.info(f"Buffer sizes: {[len(buf.actions_buf) for buf in self.multi_buffer.buffers.values()]}")
 
-                    if hypers.target_kl != float("inf") and approx_kl > hypers.target_kl:
-                        self.logger.info(f"Early stopping at epoch {epoch} due to KL divergence {approx_kl:.4f}")
-                        break
-            self.profiler.stop("gradient")
-
-            with torch.no_grad():
-                y_pred, y_true = values.cpu().numpy(), returns.cpu().numpy()
-            var_y = np.var(y_true)
-            explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
-
-            sps = int(self.global_step / (time.time() - self.start_time))
+            env.close()
             if self.wandb:
-                self.wandb.log({
-                    "charts/learning_rate": self.optimizer.param_groups[0]["lr"],
-                    "losses/explained_variance": explained_var,
-                    "charts/SPS": sps
-                }, step=self.global_step)
-            
-            
-            self.experiment.log_performance(step=self.global_step)
-
-            time_since_start = time.time() - self.start_time
-            self.logger.info(
-                f"Update {update}/{num_updates} | SPS: {sps} | Total time: {time_since_start:.2f}s"
-            )
-
-            self.logger.info(f"Buffer sizes: {[len(buf.actions_buf) for buf in self.multi_buffer.buffers.values()]}")
-
-        env.close()
-        if self.wandb:
-            self.save()
-        self.experiment.close()
-        self.logger.info("Training completed.")
+                self.save()
+            self.experiment.close()
+            self.logger.info("Training completed.")
 
     def _rollout_step(self, next_obs: Dict[str, torch.Tensor],
                       actor_ids: torch.Tensor) -> Tuple[Dict[str, torch.Tensor],
@@ -379,9 +376,8 @@ class Trainer:
             action, logprob, _, value = self.agent.get_action_and_value(next_obs)
 
         try:
-            self.profiler.start("rollout/step/env")
-            new_obs, reward, done, _, info = self.env.step(action)
-            self.profiler.stop("rollout/step/env")
+            with self.profiler.track("env"):
+                new_obs, reward, done, _, info = self.env.step(action)
         except Exception as e:
             self.logger.error(f"env.step() failed: {e}")
             raise e
@@ -485,6 +481,7 @@ class Trainer:
         wandb.log(metrics, step=self.global_step)
         self.logger.debug(f"Logged system metrics: {metrics}")
 
+
     def save(self) -> None:
         assert self.wandb is not None
         path = f"{self.experiment.exp_name}_latest.pt"
@@ -504,7 +501,7 @@ class Trainer:
         self.wandb.log_artifact(artifact)
 
 
-@hydra.main(version_base=None, config_path="../conf", config_name="config")
+@hydra.main(version_base=None, config_path="../conf", config_name="local")
 def main(cfg: DictConfig) -> None:
     obs_config = OmegaConf.to_object(cfg.observation)
     train_config = OmegaConf.to_object(cfg.train)

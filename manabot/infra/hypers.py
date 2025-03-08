@@ -48,7 +48,8 @@ class ExperimentHypers:
     wandb_project_name: str = "manabot"
     runs_dir: Path = field(default_factory=lambda: Path.home() / "manabot-runs")
     log_level: str = "INFO" 
-
+    profiler_enabled: bool = False 
+    
 @dataclass
 class AgentHypers:
     # Shared embedding space for GameObjects and Actions.
