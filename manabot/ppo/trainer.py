@@ -249,7 +249,7 @@ class Trainer:
         self.logger.info("Trainer initialized.")
 
     def train(self) -> None:
-        self.perf_tracker.startRoot()
+        self.perf_tracker.start_root()
         hypers = self.hypers
         env = self.env
         device = self.experiment.device

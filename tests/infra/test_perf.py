@@ -6,10 +6,10 @@ This suite verifies two key goals:
 
 (1) Label Enforcement:
     - A valid sequence:
-         startRoot(), start("a"), start("a/b"), stop("a/b"), stop("a"), start("z")
+         start_root(), start("a"), start("a/b"), stop("a/b"), stop("a"), start("z")
       should work.
     - An invalid sequence:
-         startRoot(), start("a"), then start("b")
+         start_root(), start("a"), then start("b")
       should raise a ValueError because when nested the label must include the parent's full path.
 
 (2) Percentage Calculations:
@@ -24,7 +24,7 @@ from manabot.infra.perf import PerformanceTracker
 
 def test_label_enforcement():
     tracker = PerformanceTracker()
-    tracker.startRoot()  # Resets tracker; active node full path is ""
+    tracker.start_root()  # Resets tracker; active node full path is ""
     
     # Valid: at root, local label "a" is allowed.
     tracker.start("a")  # now full path "a"
@@ -67,7 +67,7 @@ def test_hierarchy_percentages():
       - In group2, "x" should be about 90% and "y" about 10% of group2's time.
     """
     tracker = PerformanceTracker()
-    tracker.startRoot()  # root active node full path is ""
+    tracker.start_root()  # root active node full path is ""
     
     # Group 1
     tracker.start("group1")           # full path "group1"
@@ -132,6 +132,58 @@ def test_hierarchy_percentages():
     tol_group2 = 25.0
     assert abs(x_stats["pct_of_parent"] - 90) < tol_group2, f"'group2/x' pct_of_parent not ~90: {x_stats['pct_of_parent']}"
     assert abs(y_stats["pct_of_parent"] - 10) < tol_group2, f"'group2/y' pct_of_parent not ~10: {y_stats['pct_of_parent']}"
+
+def test_accumulated_timing():
+    """
+    Verify that repeated starts and stops for the same cached node accumulate time,
+    and that get_stats() correctly reports effective times when nodes are still running.
+
+    This test simulates multiple iterations where the same "rollout" and "gradient" nodes
+    are started and stopped. Their accumulated times should be approximately the sum of the sleep durations.
+    It also tests that while a node is running, its effective time is greater than the previously accumulated total.
+    """
+    tracker = PerformanceTracker()
+    tracker.start_root()
+
+    # Define fixed simulated sleep times (in seconds)
+    rollout_times = [0.02, 0.01, 0.015]
+    gradient_times = [0.005, 0.003, 0.004]
+    accumulated_rollout = 0.0
+    accumulated_gradient = 0.0
+
+    for i in range(len(rollout_times)):
+        # Start and stop "rollout" (cached node)
+        tracker.start("rollout")
+        time.sleep(rollout_times[i])
+        tracker.stop("rollout")
+        accumulated_rollout += rollout_times[i]
+
+        # Start and stop "gradient" (cached node)
+        tracker.start("gradient")
+        time.sleep(gradient_times[i])
+        tracker.stop("gradient")
+        accumulated_gradient += gradient_times[i]
+
+        stats = tracker.get_stats()
+        rollout_stats = stats.get("rollout")
+        assert rollout_stats is not None, "Missing stats for 'rollout'"
+        gradient_stats = stats.get("gradient")
+        assert gradient_stats is not None, "Missing stats for 'gradient'"
+        print(f"rollout_stats: {rollout_stats}")
+        print(f"gradient_stats: {gradient_stats}")
+
+        # Check that the accumulated times are approximately equal to the sum of sleeps.
+        assert abs(rollout_stats["total_time"] - accumulated_rollout) < 0.02, f"Iteration {i}: rollout time incorrect"
+        assert abs(gradient_stats["total_time"] - accumulated_gradient) < 0.02, f"Iteration {i}: gradient time incorrect"
+
+    # Now test behavior when a node is still running.
+    tracker.start("rollout")  # Restart the "rollout" node (it is cached)
+    time.sleep(0.02)
+    stats_running = tracker.get_stats()
+    running_rollout = stats_running.get("rollout", {}).get("total_time", 0)
+    # Effective time should be greater than the stored accumulated time.
+    assert running_rollout > accumulated_rollout, "Effective time for running node not greater than accumulated time"
+    tracker.stop("rollout")
 
 if __name__ == "__main__":
     pytest.main([__file__])
