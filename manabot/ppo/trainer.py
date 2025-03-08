@@ -30,7 +30,7 @@ from manabot.env import ObservationSpace, VectorEnv, Match, Reward
 from manabot.ppo.agent import Agent
 import manabot.infra.hypers
 
-from manabot.infra.perf import PerformanceTracker
+from manabot.infra.profiler import PerformanceTracker
 
 manabot.infra.hypers.initialize()
 
@@ -238,7 +238,7 @@ class Trainer:
         self.invalid_batch_threshold = 5
         self.wandb = self.experiment.wandb_run
 
-        self.perf_tracker = self.experiment.perf_tracker
+        self.profiler = self.experiment.profiler
 
         if self.wandb:
             self.wandb.summary.update({
@@ -249,7 +249,7 @@ class Trainer:
         self.logger.info("Trainer initialized.")
 
     def train(self) -> None:
-        self.perf_tracker.start_root()
+        self.profiler.start_root()
         hypers = self.hypers
         env = self.env
         device = self.experiment.device
@@ -280,8 +280,8 @@ class Trainer:
             self.logger.info("Starting rollout data collection.")
             wandb.log({"rollout/step": 0}, step=self.global_step)
             
-            self.perf_tracker.start("rollout")
-            self.perf_tracker.start("rollout/step")
+            self.profiler.start("rollout")
+            self.profiler.start("rollout/step")
             for step in range(hypers.num_steps):
                 try:
                     next_obs, next_done, prev_actor_ids = self._rollout_step(next_obs, prev_actor_ids)
@@ -293,9 +293,9 @@ class Trainer:
                         raise RuntimeError(f"Failure during rollout; halting training: {e}")
                     else:
                         self.logger.error("Skipping faulty rollout step.")
-            self.perf_tracker.stop("rollout/step")
+            self.profiler.stop("rollout/step")
 
-            self.perf_tracker.start("rollout/advantage")
+            self.profiler.start("rollout/advantage")
             with torch.no_grad():
                 next_value = self.agent.get_value(next_obs)
             self.multi_buffer.compute_advantages(next_value, next_done,
@@ -307,15 +307,15 @@ class Trainer:
             except ValueError as e:
                 self.logger.error(f"No valid transitions in buffers: {e}")
                 raise
-            self.perf_tracker.stop("rollout/advantage")
-            self.perf_tracker.stop("rollout")
+            self.profiler.stop("rollout/advantage")
+            self.profiler.stop("rollout")
 
 
             clipfracs = []
             approx_kl = 0.0
             inds = np.arange(batch_size)
 
-            self.perf_tracker.start("gradient")
+            self.profiler.start("gradient")
             for epoch in range(hypers.update_epochs):
                 np.random.shuffle(inds)
                 for start in range(0, batch_size, minibatch_size):
@@ -340,7 +340,7 @@ class Trainer:
                     if hypers.target_kl != float("inf") and approx_kl > hypers.target_kl:
                         self.logger.info(f"Early stopping at epoch {epoch} due to KL divergence {approx_kl:.4f}")
                         break
-            self.perf_tracker.stop("gradient")
+            self.profiler.stop("gradient")
 
             with torch.no_grad():
                 y_pred, y_true = values.cpu().numpy(), returns.cpu().numpy()
@@ -379,9 +379,9 @@ class Trainer:
             action, logprob, _, value = self.agent.get_action_and_value(next_obs)
 
         try:
-            self.perf_tracker.start("rollout/step/env")
+            self.profiler.start("rollout/step/env")
             new_obs, reward, done, _, info = self.env.step(action)
-            self.perf_tracker.stop("rollout/step/env")
+            self.profiler.stop("rollout/step/env")
         except Exception as e:
             self.logger.error(f"env.step() failed: {e}")
             raise e

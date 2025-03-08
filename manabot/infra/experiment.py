@@ -13,8 +13,8 @@ import torch
 from typing import Optional
 import wandb
 import numpy as np
-from .hypers import ExperimentHypers, Hypers
-from manabot.infra.perf import PerformanceTracker
+from .hypers import ExperimentHypers, Hypers    
+from manabot.infra.profiler import Profiler
 import manabot.infra.log
 
 CODE_CONTEXT_ROOT = Path(os.getenv("CODE_CONTEXT_ROOT", str(Path.home() / "src")))
@@ -44,7 +44,7 @@ class Experiment:
         self.runs_dir = self.experiment_hypers.runs_dir / self.exp_name
         self.runs_dir.mkdir(parents=True, exist_ok=True)
         self.wandb_run = None
-        self.perf_tracker = PerformanceTracker()
+        self.profiler = Profiler()
         level = getattr(logging, self.experiment_hypers.log_level.upper(), logging.INFO)
         manabot.infra.log.LOG_LEVEL = level
         self.logger = manabot.infra.log.getLogger(__name__)
@@ -131,7 +131,7 @@ class Experiment:
         if not self.wandb_on or not self.wandb_run:
             return
 
-        perf_stats = self.perf_tracker.get_stats()
+        perf_stats = self.profiler.get_stats()
 
         log_dict = {}
         for node_path, data in perf_stats.items():
