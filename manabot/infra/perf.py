@@ -12,23 +12,28 @@ The tracker checks that the current active node matches the provided label.
 """
 
 import time
-
+from typing import Optional
 class TimingNode:
-    def __init__(self, label: str, parent: "TimingNode" = None):
+    def __init__(self, label: str, parent: Optional["TimingNode"] = None):
         self.label = label  # local label only
         self.parent = parent
-        self.total_time = 0.0
+        self.previous_total = 0.0
         self.start_time = None
         self.children = []
 
     def start(self):
         self.start_time = time.perf_counter()
+    
+    def runningTotal(self):
+        if self.start_time is None:
+            return self.previous_total
+        return self.previous_total + (time.perf_counter() - self.start_time)
 
     def stop(self):
         if self.start_time is None:
             raise RuntimeError(f"Timer '{self.label}' was not started!")
         elapsed = time.perf_counter() - self.start_time
-        self.total_time += elapsed
+        self.previous_total += elapsed
         self.start_time = None
         return elapsed
 
@@ -109,10 +114,7 @@ class PerformanceTracker:
         self.startRoot()
 
     def get_stats(self) -> dict:
-        total = self.root.total_time
-        if total <= 0:
-            assert self.root.start_time is not None, "Root timer was never started!"
-            total = time.perf_counter() - self.root.start_time
+        total = self.root.runningTotal()
 
         stats = {}
 
@@ -120,14 +122,14 @@ class PerformanceTracker:
             if node.parent is not None:  # skip root
                 current_path = f"{path}/{node.label}" if path else node.label
                 stats[current_path] = {
-                    "total_time": node.total_time,
-                    "pct_of_parent": (node.total_time / parent_time * 100) if parent_time > 0 else 0,
-                    "pct_of_total": (node.total_time / total * 100) if total > 0 else 0,
+                    "total_time": node.runningTotal(),
+                    "pct_of_parent": (node.runningTotal() / parent_time * 100) if parent_time > 0 else 0,
+                    "pct_of_total": (node.runningTotal() / total * 100) if total > 0 else 0,
                 }
                 new_path = current_path
             else:
                 new_path = ""
             for child in node.children:
-                recurse(child, new_path, node.total_time)
-        recurse(self.root, "", self.root.total_time)
+                recurse(child, new_path, node.runningTotal())
+        recurse(self.root, "", self.root.runningTotal())
         return stats
