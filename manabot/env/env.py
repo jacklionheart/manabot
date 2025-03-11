@@ -13,9 +13,8 @@ import numpy as np
 import managym
 from .observation import ObservationSpace
 from .match import Match, Reward
-from manabot.infra import getLogger
+from manabot.infra.log import getLogger
 
-logger = getLogger(__name__)
 class Env(gym.Env):
     metadata = {"render_modes": ["human"], "render_fps": 30}
 
@@ -104,7 +103,7 @@ class Env(gym.Env):
             truncated: Whether the episode ended due to a timelimit or external condition.
             info: Additional debug info from managym, e.g. partial game logs.
         """
-        log = logger.getChild("step")
+        log = getLogger(__name__).getChild("step")
         cpp_obs, cpp_reward, terminated, truncated, info = self._cpp_env.step(action)
         reward = self.reward.compute(cpp_reward, self._last_obs, cpp_obs)
         info["true_terminated"] = terminated

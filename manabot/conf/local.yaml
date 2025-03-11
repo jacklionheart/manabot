@@ -1,4 +1,4 @@
-# manabot/scripts/conf/config.yaml
+# manabot/conf/config.yaml
 
 defaults:
   - observation: default
@@ -9,14 +9,15 @@ defaults:
   - experiment: default
 
 train:
-  num_envs: 16
-  num_steps: 256
-  total_timesteps: 5000000
+  num_envs: 4
+  num_steps: 16
+  total_timesteps: 10000
   learning_rate: 2.5e-4
 
 experiment:
   exp_name: "quick_train"
-  device: "cuda"
+  device: "cpu"
+  profiler_enabled: True
 
 hydra:
   run:

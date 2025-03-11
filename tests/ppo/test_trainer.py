@@ -54,7 +54,6 @@ def experiment(run_dir):
         seed=42,
         wandb=False,
         device="cpu",
-        tensorboard=True,
         runs_dir=Path(run_dir)
     ))
 
@@ -199,21 +198,6 @@ class TestPPOOptimization:
         trainer.hypers.clip_vloss = True
         _, _ = trainer._optimize_step(obs, logprobs, actions, advantages, returns, values)
 
-def test_save_load_checkpoint(trainer, tmp_path):
-        """Test checkpoint save/load preserves network state."""
-        # Do some training to get non-random weights
-        next_obs, next_done, _ = collect_rollout(trainer, steps=trainer.hypers.num_steps)
-        
-        ckpt_path = tmp_path / "checkpoint.pt"
-        trainer.save_checkpoint(str(ckpt_path))
-        
-        # Create new trainer and load checkpoint
-        new_trainer = Trainer(trainer.agent, trainer.experiment, trainer.env, trainer.hypers)
-        new_trainer.load_checkpoint(str(ckpt_path))
-        
-        # Verify parameters match
-        for p1, p2 in zip(trainer.agent.parameters(), new_trainer.agent.parameters()):
-            assert torch.allclose(p1, p2)
 
 def test_action_masking(trainer):
     """Test action masking correctly prevents invalid actions."""

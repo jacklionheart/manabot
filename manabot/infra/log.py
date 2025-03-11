@@ -1,10 +1,13 @@
 import logging
 
+LOG_LEVEL = logging.INFO
+
+import logging
 
 def getLogger(name: str) -> logging.Logger:
     """
-    Returns a logger where the format has been configured to omit the filename,
-    but we retain the log level.
+    Returns a logger with a custom output format using our globally configured log level.
+    Only our loggers (e.g. those with names starting with "manabot") will use this level.
     """
     logger = logging.getLogger(name)
     
@@ -12,26 +15,24 @@ def getLogger(name: str) -> logging.Logger:
     if getattr(logger, '_custom_configured', False):
         return logger
 
-    # Define the custom format (notice no file name here)
+    # Define the custom format.
     custom_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     formatter = logging.Formatter(custom_format)
     
-    # Get the effective level (could be inherited) and set it explicitly.
-    current_level = logger.getEffectiveLevel()
-    logger.setLevel(current_level)
+    # Set the logger's level from our global configuration.
+    logger.setLevel(LOG_LEVEL)
     
     # If handlers exist, update them; otherwise, add a new StreamHandler.
     if logger.handlers:
         for handler in logger.handlers:
             handler.setFormatter(formatter)
-            handler.setLevel(current_level)
+            handler.setLevel(LOG_LEVEL)
     else:
         handler = logging.StreamHandler()
         handler.setFormatter(formatter)
-        handler.setLevel(current_level)
+        handler.setLevel(LOG_LEVEL)
         logger.addHandler(handler)
     
-    # Mark the logger as custom configured so future calls skip reconfiguration.
+    # Mark the logger as custom configured.
     logger._custom_configured = True
     return logger
-

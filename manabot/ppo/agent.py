@@ -9,7 +9,6 @@ from typing import Dict, Tuple, Optional
 
 from manabot.env import ObservationSpace
 from manabot.infra import getLogger, AgentHypers
-logger = getLogger(__name__)
 class Agent(nn.Module):
     """
     Agent that:
@@ -22,6 +21,7 @@ class Agent(nn.Module):
         super().__init__()
         self.observation_space = observation_space
         self.hypers = hypers
+        self.logger = getLogger(__name__)
 
         # Extract dimensions from observation embedding configuration.
         enc = observation_space.encoder
@@ -38,10 +38,10 @@ class Agent(nn.Module):
         self.perm_embedding = ProjectionLayer(perm_dim, embed_dim)
         # CHANGE: Build action_embedding to use only the first (action_dim - 1) features
         self.action_embedding = ProjectionLayer(action_dim - 1, embed_dim)
-        logger.info(f"Player embedding: ({player_dim} -> {embed_dim})")
-        logger.info(f"Card embedding: ({card_dim} -> {embed_dim})")
-        logger.info(f"Perm embedding: ({perm_dim} -> {embed_dim})")
-        logger.info(f"Action embedding: ({action_dim - 1} -> {embed_dim})")
+        self.logger.info(f"Player embedding: ({player_dim} -> {embed_dim})")
+        self.logger.info(f"Card embedding: ({card_dim} -> {embed_dim})")
+        self.logger.info(f"Perm embedding: ({perm_dim} -> {embed_dim})")
+        self.logger.info(f"Action embedding: ({action_dim - 1} -> {embed_dim})")
         
         # Currently not using attention
         # Global game state processor.
@@ -52,7 +52,7 @@ class Agent(nn.Module):
         # Action processing.
         actions_with_focus_dim = (self.max_focus_objects + 1) * embed_dim
         self.action_layer = ProjectionLayer(actions_with_focus_dim, embed_dim)
-        logger.info(f"Action layer: ({actions_with_focus_dim} -> {embed_dim})")
+        self.logger.info(f"Action layer: ({actions_with_focus_dim} -> {embed_dim})")
         # Policy and value heads.
         self.policy_head = nn.Sequential(
             layer_init(nn.Linear(embed_dim, embed_dim)),
@@ -66,11 +66,11 @@ class Agent(nn.Module):
             nn.ReLU(),
             layer_init(nn.Linear(embed_dim, 1))
         )
-        logger.info(f"Policy head: ({embed_dim} -> {1})")
-        logger.info(f"Value head: ({embed_dim} -> 1)")
+        self.logger.info(f"Policy head: ({embed_dim} -> {1})")
+        self.logger.info(f"Value head: ({embed_dim} -> 1)")
     
     def forward(self, obs: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
-        log = logger.getChild("forward")
+        log = self.logger.getChild("forward")
 
         # Gather object embeddings, controller IDs, and validity mask.
         objects, is_agent, validity = self._gather_object_embeddings(obs)
@@ -105,7 +105,7 @@ class Agent(nn.Module):
         Incorporates focus object embeddings into the action embeddings by concatenating the
         original action embedding with the flattened focus embeddings.
         """
-        log = logger.getChild("add_focus")
+        log = self.logger.getChild("add_focus")
 
         B, max_actions, embed_dim = actions.shape
         log.debug(f"B: {B}")
@@ -146,7 +146,7 @@ class Agent(nn.Module):
         Gathers and embeds actions from the observation.
         Applies validity masking to the action embeddings.
         """
-        log = logger.getChild("gather_informed_actions")
+        log = self.logger.getChild("gather_informed_actions")
         log.debug(f"Obs: {obs.keys()}")
         log.debug(f"Obs['actions']: {obs['actions'].shape}")
         # CHANGE: Use only the first (action_dim - 1) features (i.e. drop the validity flag)
@@ -165,7 +165,7 @@ class Agent(nn.Module):
         Gathers and encodes game objects from the observation and assembles their validity masks.
         Order: agent_player, opponent_player, agent_cards, opponent_cards, agent_permanents, opponent_permanents.
         """
-        log = logger.getChild("gather_object_embeddings")
+        log = self.logger.getChild("gather_object_embeddings")
         device = obs["agent_player"].device
         log.debug(f"Device: {device}")
         log.debug(f"Obs['agent_player']: {obs['agent_player'].shape}")
@@ -223,7 +223,7 @@ class Agent(nn.Module):
                              action: Optional[torch.Tensor] = None,
                              deterministic: bool = False
                             ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        log = logger.getChild("get_action_and_value")
+        log = self.logger.getChild("get_action_and_value")
         logits, value = self.forward(obs)
         if (obs["actions_valid"].sum(dim=-1) == 0).any():
             raise ValueError("No valid actions available")
@@ -248,7 +248,7 @@ class MaxPoolingLayer(nn.Module):
         self.dim = dim
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        log = logger.getChild("forward")
+        log = getLogger(__name__).getChild("forward")
         log.debug(f"X: {x.shape}")
         pooled, _ = torch.max(x, dim=self.dim)
         log.debug(f"Pooled: {pooled.shape}")
@@ -265,7 +265,7 @@ class ProjectionLayer(nn.Module):
         )
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        log = logger.getChild("forward")
+        log = getLogger(__name__).getChild("forward")
         log.debug(f"X: {x.shape}")
         return self.projection(x)
 
@@ -282,8 +282,8 @@ class GameObjectAttention(nn.Module):
     def __init__(self, embedding_dim: int, num_heads: int):
         super().__init__()
         self.embedding_dim = embedding_dim
-        log = logger.getChild("attention")
-        log.info(f"Making perspective vector of size {embedding_dim}")
+        self.logger = getLogger(__name__).getChild("attention")
+        self.logger.info(f"Making perspective vector of size {embedding_dim}")
         self.perspective = nn.Parameter(torch.randn(embedding_dim) / embedding_dim**0.5)
         self.mha = nn.MultiheadAttention(embedding_dim, num_heads=num_heads, batch_first=True)
         self.norm1 = nn.LayerNorm(embedding_dim)
@@ -297,7 +297,7 @@ class GameObjectAttention(nn.Module):
     def forward(self, objects: torch.Tensor, is_agent: torch.Tensor, key_padding_mask: torch.BoolTensor) -> torch.Tensor:
         # objects: [B, total_objs, embedding_dim]
         # is_agent: [B, total_objs]
-        log = logger.getChild("attention.forward")
+        log = self.logger.getChild("forward")
         log.debug(f"Objects: {objects.shape}")
         log.debug(f"Is agent: {is_agent.shape}")
         log.debug(f"Key padding mask: {key_padding_mask.shape}")
