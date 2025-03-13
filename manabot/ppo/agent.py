@@ -46,7 +46,7 @@ class Agent(nn.Module):
         # Currently not using attention
         # Global game state processor.
         # num_heads = hypers.num_attention_heads
-        #self.attention = GameObjectAttention(embed_dim, num_heads=num_heads)
+        # self.attention = GameObjectAttention(embed_dim, num_heads=num_heads)
         # logger.info(f"Attention: {embed_dim} -> {embed_dim}")
         
         # Action processing.

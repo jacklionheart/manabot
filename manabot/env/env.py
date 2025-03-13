@@ -31,7 +31,10 @@ class Env(gym.Env):
         # - false, # terminate is never true so that AsyncVectorEnv doesnt call reset()
         # - false, # truncated is never true so that AsyncVectorEnv doesnt call reset()
         # - info["true_terminated"]: true
-        auto_reset: bool = False
+        seed: int = 0,
+        auto_reset: bool = False,
+        enable_profiler: bool = False,
+        enable_behavior_tracking: bool = False
     ):
         """
         Gymnasium-compatible Env wrapper around the managym.Env C++ class.
@@ -42,8 +45,13 @@ class Env(gym.Env):
             render_mode: Gymnasium render mode, e.g. "human" or None.
         """
         super().__init__()
+        self.seed = seed
         self.skip_trivial = True
-        self._cpp_env = managym.Env(self.skip_trivial)
+        self.enable_profiler = enable_profiler
+        self.enable_behavior_tracking = enable_behavior_tracking
+        logger = getLogger(__name__)
+        logger.info(f"Initializing Env with seed={self.seed}, skip_trivial={self.skip_trivial}, enable_profiler={self.enable_profiler}, enable_behavior_tracking={self.enable_behavior_tracking}")
+        self._cpp_env = managym.Env(seed=self.seed, skip_trivial=self.skip_trivial, enable_profiler=self.enable_profiler, enable_behavior_tracking=self.enable_behavior_tracking)
 
         # For when we need manabot.ObservationSpace
         self.obs_space: ObservationSpace = obs_space
@@ -125,6 +133,9 @@ class Env(gym.Env):
 
     def render(self):
         pass
+
+    def info(self) -> Dict[str, Any]:
+        return self._cpp_env.info()
 
     def close(self):
         pass

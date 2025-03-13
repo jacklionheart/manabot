@@ -25,7 +25,7 @@ from manabot.env import Env, Match, Reward, ObservationSpace
 from manabot.env.observation import get_agent_indices
 from manabot.infra.hypers import MatchHypers, RewardHypers, add_hypers, parse_hypers
 from manabot.infra.log import getLogger
-
+from manabot.sim.player import Player, ModelPlayer, RandomPlayer, DefaultPlayer, load_model_from_wandb
 logger = getLogger(__name__)
 
 # -----------------------------------------------------------------------------
@@ -33,267 +33,14 @@ logger = getLogger(__name__)
 # -----------------------------------------------------------------------------
 
 @dataclass
-class EvaluationHypers:
-    """Hyperparameters for model evaluation."""
+class SimulationHypers:
+    """Hyperparameters for model simulation."""
     hero: str = "quick_train"
-    villain: str = "random"
+    villain: str = "default"
     num_games: int = 100
     num_threads: int = 4
     max_steps: int = 2000
     match: MatchHypers = field(default_factory=MatchHypers)  # Match configuration
-
-
-# -----------------------------------------------------------------------------
-# Model Loading
-# -----------------------------------------------------------------------------
-
-    
-def load_model_from_wandb(
-    artifact_name: str,
-    version: str = "latest", 
-    project: Optional[str] = None,
-    device: str = "cpu"
-) -> Agent:
-    """
-    Load a trained model from wandb artifacts with minimal wandb interaction.
-    
-    Args:
-        artifact_name: Name of the experiment (e.g. "quick_train")
-        version: Version string (e.g. "v3" or "latest")
-        project: Wandb project name
-        device: Device to load model on ("cpu" or "cuda")
-        
-    Returns:
-        Loaded agent model ready for inference
-    """
-    try:
-        # Force online mode to ensure artifact can be fetched
-        os.environ['WANDB_MODE'] = 'online'
-        
-        # Use a silent API object without starting a run
-        api = wandb.Api()
-        artifact_path = f"{project or 'manabot'}/{artifact_name + "_latest.pt"}:{version}"
-        logger.info(f"Loading artifact: {artifact_path}")
-        
-        try:
-            artifact = api.artifact(artifact_path)
-        except Exception as e:
-            logger.warning(f"Error loading artifact {artifact_path}: {e}")
-            # Try with a more specific path format
-            artifact_path = f"{project or 'manabot'}/{artifact_name}_latest.pt:{version}"
-            logger.info(f"Trying alternative artifact path: {artifact_path}")
-            artifact = api.artifact(artifact_path)
-            
-        artifact_dir = artifact.download("/tmp")
-        
-        # Directly use the expected filename pattern based on the save method
-        potential_paths = [
-            os.path.join(artifact_dir, f"{artifact_name}.pt"),
-            os.path.join(artifact_dir, f"{artifact_name}_latest.pt"),
-        ]
-        
-        # Also look for any .pt files
-        pt_files = [f for f in os.listdir(artifact_dir) if f.endswith('.pt')]
-        potential_paths.extend([os.path.join(artifact_dir, f) for f in pt_files])
-        
-        # Find the first valid checkpoint file
-        checkpoint_path = None
-        for path in potential_paths:
-            if os.path.exists(path):
-                checkpoint_path = path
-                break
-                
-        if checkpoint_path is None:
-            raise FileNotFoundError(f"No .pt files found in the artifact at {artifact_dir}")
-            
-        logger.info(f"Loading checkpoint from {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location=device)
-        
-        # Debug: print the checkpoint keys
-        logger.info(f"Checkpoint keys: {list(checkpoint.keys())}")
-        
-        # Look for model state dict with flexible key names
-        state_dict_key = None
-        for key in ['agent_state_dict', 'model_state_dict', 'state_dict']:
-            if key in checkpoint:
-                state_dict_key = key
-                break
-                
-        if state_dict_key is None:
-            raise ValueError(f"Checkpoint does not contain a state dictionary. Keys found: {list(checkpoint.keys())}")
-            
-        logger.info(f"Using state dictionary from key: {state_dict_key}")
-            
-        # Create observation space and agent
-        from manabot.infra.hypers import ObservationSpaceHypers, AgentHypers
-        
-        # Create default observation space and agent hyperparameters
-        obs_hypers = ObservationSpaceHypers()
-        agent_hypers = AgentHypers()
-        
-        # Create observation space and agent with default hyperparameters
-        obs_space = ObservationSpace(obs_hypers)
-        agent = Agent(obs_space, agent_hypers)
-        logger.info("Created model with default hyperparameters")
-        
-        # Load model weights
-        agent.load_state_dict(checkpoint[state_dict_key])
-        agent.eval()
-        agent = agent.to(device)
-        
-        # See if we have information about training steps
-        if 'global_step' in checkpoint:
-            logger.info(f"Model was trained for {checkpoint['global_step']} steps")
-        
-        logger.info(f"Successfully loaded model")
-        return agent
-    except Exception as e:
-        logger.error(f"Error loading model from wandb: {e}")
-        # If the exception relates to artifact not found, show clear message
-        if "not found" in str(e).lower():
-            logger.error(f"Could not find artifact '{artifact_name}'. Check if the name is correct and the artifact exists.")
-        # If the exception relates to model loading, print more details
-        elif "state dictionary" in str(e) or "state_dict" in str(e):
-            logger.error("The model file was found but its structure doesn't match expectations.")
-            logger.error("This could happen if the model was saved with a different format or version.")
-        raise
-
-# -----------------------------------------------------------------------------
-# Player Classes
-# -----------------------------------------------------------------------------
-
-class PlayerType(Enum):
-    """Types of players for evaluation."""
-    MODEL = "model"
-    RANDOM = "random"
-    RULE_BASED = "rule_based"  # For future rule-based players
-
-class Player:
-    """Base player class for evaluation."""
-    def __init__(self, name: str, player_type: PlayerType):
-        self.name = name
-        self.player_type = player_type
-        self.device = "cpu"
-        self.wins = 0
-        self.games = 0
-        self.action_history = []  # Track actions for analysis
-    
-    def get_action(self, obs: Dict[str, np.ndarray]) -> int:
-        """Get action from observation."""
-        raise NotImplementedError
-    
-    @property
-    def win_rate(self) -> float:
-        """Calculate win rate."""
-        return self.wins / self.games if self.games > 0 else 0.0
-    
-    def record_result(self, won: bool) -> None:
-        """Record game result."""
-        self.games += 1
-        if won:
-            self.wins += 1
-    
-    def record_action(self, action: int, obs: Dict[str, np.ndarray]) -> None:
-        """Record an action for later analysis."""
-        self.action_history.append((action, obs.get("actions", []).shape[0]))
-    
-    def get_action_distribution(self) -> Dict[str, float]:
-        """Get distribution of action types."""
-        if not self.action_history:
-            return {}
-        
-        action_counts = Counter([action for action, _ in self.action_history])
-        total = len(self.action_history)
-        return {f"action_{action}": count/total for action, count in action_counts.items()}
-    
-    def reset_history(self) -> None:
-        """Reset action history."""
-        self.action_history = []
-    
-    def to(self, device: str) -> 'Player':
-        """Move player to specified device."""
-        self.device = device
-        return self
-
-class ModelPlayer(Player):
-    """Player that uses a trained model for inference."""
-    def __init__(
-        self, 
-        name: str, 
-        agent: Agent, 
-        deterministic: bool = True,
-        record_logits: bool = False
-    ):
-        super().__init__(name, PlayerType.MODEL)
-        self.agent = agent
-        self.deterministic = deterministic
-        self.device = next(agent.parameters()).device
-        self.record_logits = record_logits
-        self.logits_history = [] if record_logits else None
-    
-    def get_action(self, obs: Dict[str, np.ndarray]) -> int:
-        """Get action from model."""
-        # Convert numpy arrays to tensors with batch dimension
-        tensor_obs = {
-            k: torch.tensor(v, dtype=torch.float32).unsqueeze(0).to(self.device)
-            for k, v in obs.items()
-        }
-        
-        # Get action from model
-        with torch.no_grad():
-            logits, _ = self.agent(tensor_obs)
-            if self.record_logits:
-                assert self.logits_history is not None
-                self.logits_history.append(logits.detach().cpu().numpy())
-                
-            action, _, _, _ = self.agent.get_action_and_value(
-                tensor_obs, deterministic=self.deterministic)
-            
-            # Record the action for analysis
-            action_value = action.item()
-            self.record_action(action_value, obs)
-            return action_value
-    
-    def get_action_confidence(self) -> Dict[str, float]:
-        """Get statistics about action confidence."""
-        if not self.logits_history:
-            return {}
-        
-        # Calculate softmax probabilities
-        probs = []
-        for logits in self.logits_history:
-            # Apply softmax to get probabilities
-            exp_logits = np.exp(logits - np.max(logits, axis=1, keepdims=True))
-            probs.append(exp_logits / np.sum(exp_logits, axis=1, keepdims=True))
-        
-        # Calculate statistics
-        chosen_probs = [p.max() for p in probs]
-        return {
-            "mean_confidence": np.mean(chosen_probs),
-            "min_confidence": np.min(chosen_probs),
-            "max_confidence": np.max(chosen_probs),
-        }
-    
-    def to(self, device: str) -> 'ModelPlayer':
-        """Move player and model to device."""
-        super().to(device)
-        self.agent = self.agent.to(device)
-        return self
-
-class RandomPlayer(Player):
-    """Player that selects random valid actions."""
-    def __init__(self, name: str):
-        super().__init__(name, PlayerType.RANDOM)
-    
-    def get_action(self, obs: Dict[str, np.ndarray]) -> int:
-        """Get random valid action."""
-        valid_actions = np.where(obs["actions_valid"] > 0)[0]
-        if len(valid_actions) == 0:
-            raise ValueError("No valid actions available")
-        
-        action = int(np.random.choice(valid_actions))
-        self.record_action(action, obs)
-        return action
 
 # -----------------------------------------------------------------------------
 # Game Statistics
@@ -321,22 +68,31 @@ class GameStats:
         self.steps_to_win = []  # Track steps taken in winning games
         self.phase_distributions = defaultdict(int)  # Track game phases
         self.game_records = []  # Detailed game records
+        
+        # Profiler and behavior tracking
+        self.profiler_data = defaultdict(list)  # Store profiler data from each thread
+        self.hero_behavior = defaultdict(list)  # Store hero behavior metrics
+        self.villain_behavior = defaultdict(list)  # Store villain behavior metrics
     
     def record_game(
         self, 
         outcome: GameOutcome, 
         steps: int, 
         duration: float,
-        metadata: Optional[Dict[str, Any]] = None
+        metadata: Optional[Dict[str, Any]] = None,
+        profiler_info: Optional[Dict[str, Any]] = None,
+        behavior_info: Optional[Dict[str, Dict[str, Any]]] = None
     ) -> None:
         """
-        Record a completed game with optional metadata.
+        Record a completed game with optional metadata, profiler and behavior data.
         
         Args:
             outcome: Game outcome (hero win, villain win, timeout)
             steps: Number of steps in the game
             duration: Time taken for the game in seconds
             metadata: Optional additional game data for analysis
+            profiler_info: Profiler metrics from the environment
+            behavior_info: Behavior tracking metrics for hero and villain
         """
         game_record = {
             "outcome": outcome,
@@ -361,6 +117,60 @@ class GameStats:
                 
             self.total_steps += steps
             self.total_duration += duration
+            
+            # Record profiler and behavior data if available
+            if profiler_info:
+                self._record_profiler_data(profiler_info)
+                
+            if behavior_info:
+                if "hero" in behavior_info:
+                    self._record_behavior_data(behavior_info["hero"], self.hero_behavior)
+                if "villain" in behavior_info:
+                    self._record_behavior_data(behavior_info["villain"], self.villain_behavior)
+    
+    def _record_profiler_data(self, profiler_info: Dict[str, str]) -> None:
+        """
+        Record profiler data from the environment.
+        
+        Args:
+            profiler_info: Dictionary of profiler metrics
+        """
+        for key, value in profiler_info.items():
+            # Extract total time and count from the string format
+            if 'total=' in value and 'count=' in value:
+                parts = value.split(', ')
+                total_part = parts[0].replace('total=', '').replace('s', '')
+                count_part = parts[1].replace('count=', '')
+                
+                try:
+                    total = float(total_part)
+                    count = int(count_part)
+                    
+                    # Store both total and count for proper averaging later
+                    self.profiler_data[key].append({
+                        "total": total,
+                        "count": count
+                    })
+                except (ValueError, TypeError):
+                    # Skip if parsing fails
+                    continue
+    
+    def _record_behavior_data(self, behavior_info: Dict[str, str], target_dict: Dict[str, list]) -> None:
+        """
+        Record behavior tracking data.
+        
+        Args:
+            behavior_info: Dictionary of behavior metrics
+            target_dict: Target dictionary to store the data
+        """
+        for key, value in behavior_info.items():
+            try:
+                # Try to convert to float for numerical metrics
+                val = float(value)
+                target_dict[key].append(val)
+            except (ValueError, TypeError):
+                # Keep as string if not convertible
+                target_dict[key].append(value)
     
     def get_summary(self) -> Dict[str, Any]:
         """Get summary statistics."""
@@ -407,6 +217,13 @@ class GameStats:
             "late_game_win_rate": self._calculate_win_rate_by_turn_range(26, float('inf')),
         }
         
+        # Add profiler and behavior data
+        if self.profiler_data:
+            analysis["profiler"] = self.get_profiler_summary()
+            
+        if self.hero_behavior or self.villain_behavior:
+            analysis["behavior"] = self.get_behavior_summary()
+        
         return analysis
     
     def _get_percentiles(self, values: List[int]) -> Dict[str, Any]:
@@ -436,6 +253,120 @@ class GameStats:
         hero_wins = sum(1 for g in games_in_range 
                         if g["outcome"] == GameOutcome.HERO_WIN)
         return hero_wins / len(games_in_range)
+    
+    def get_profiler_summary(self) -> Dict[str, Any]:
+        """
+        Get summary of profiler data.
+        
+        Returns:
+            Dictionary with averaged profiler metrics
+        """
+        summary = {}
+        
+        for key, entries in self.profiler_data.items():
+            if not entries:
+                continue
+                
+            # Calculate summed totals and counts
+            total_sum = sum(entry["total"] for entry in entries)
+            count_sum = sum(entry["count"] for entry in entries)
+            
+            # Calculate averages
+            avg_time = total_sum / len(entries)
+            avg_count = count_sum / len(entries)
+            
+            summary[key] = {
+                "avg_total_time": avg_time,
+                "avg_call_count": avg_count,
+                "avg_time_per_call": total_sum / count_sum if count_sum > 0 else 0
+            }
+            
+        return summary
+        
+    def get_behavior_summary(self) -> Dict[str, Dict[str, float]]:
+        """
+        Get summary of behavior data.
+        
+        Returns:
+            Dictionary with averaged behavior metrics for hero and villain
+        """
+        hero_summary = {}
+        villain_summary = {}
+        
+        # Process hero behavior
+        for key, values in self.hero_behavior.items():
+            if not values:
+                continue
+                
+            # Calculate average
+            if all(isinstance(v, (int, float)) for v in values):
+                hero_summary[key] = sum(values) / len(values)
+            else:
+                # For non-numeric values, just take the most common
+                hero_summary[key] = Counter(values).most_common(1)[0][0]
+                
+        # Process villain behavior
+        for key, values in self.villain_behavior.items():
+            if not values:
+                continue
+                
+            # Calculate average
+            if all(isinstance(v, (int, float)) for v in values):
+                villain_summary[key] = sum(values) / len(values)
+            else:
+                # For non-numeric values, just take the most common
+                villain_summary[key] = Counter(values).most_common(1)[0][0]
+                
+        return {
+            "hero": hero_summary,
+            "villain": villain_summary
+        }
+    
+    def log_profiler_and_behavior_summary(self, logger) -> None:
+        """
+        Log profiler and behavior summary statistics.
+        
+        Args:
+            logger: Logger to use for output
+        """
+        # Log profiler summary
+        profiler_summary = self.get_profiler_summary()
+        if profiler_summary:
+            logger.info("Profiler Summary (Top 10 by total time):")
+            
+            # Sort by average total time
+            sorted_metrics = sorted(
+                profiler_summary.items(), 
+                key=lambda x: x[1]["avg_total_time"], 
+                reverse=True
+            )[:10]
+            
+            for key, stats in sorted_metrics:
+                logger.info(f"  {key}:")
+                logger.info(f"    Avg total time: {stats['avg_total_time']:.6f}s")
+                logger.info(f"    Avg call count: {stats['avg_call_count']:.1f}")
+                logger.info(f"    Avg time per call: {stats['avg_time_per_call']:.8f}s")
+        
+        # Log behavior summary
+        behavior_summary = self.get_behavior_summary()
+        if behavior_summary:
+            # Hero behavior
+            if behavior_summary["hero"]:
+                logger.info("Hero Behavior Metrics:")
+                for key, value in sorted(behavior_summary["hero"].items()):
+                    if isinstance(value, float):
+                        logger.info(f"  {key}: {value:.2f}")
+                    else:
+                        logger.info(f"  {key}: {value}")
+            
+            # Villain behavior
+            if behavior_summary["villain"]:
+                logger.info("Villain Behavior Metrics:")
+                for key, value in sorted(behavior_summary["villain"].items()):
+                    if isinstance(value, float):
+                        logger.info(f"  {key}: {value:.2f}")
+                    else:
+                        logger.info(f"  {key}: {value}")
     
     def log_to_wandb(self, run) -> None:
         """Log summary statistics and visualizations to wandb."""
@@ -479,6 +410,19 @@ class GameStats:
                 "eval/mid_game_win_rate": detailed["mid_game_win_rate"],
                 "eval/late_game_win_rate": detailed["late_game_win_rate"],
             })
+            
+            # Log behavior metrics
+            behavior_summary = self.get_behavior_summary()
+            
+            # Hero behavior metrics
+            for key, value in behavior_summary["hero"].items():
+                if isinstance(value, (int, float)):
+                    run.log({f"eval/hero_{key}": value})
+                    
+            # Villain behavior metrics
+            for key, value in behavior_summary["villain"].items():
+                if isinstance(value, (int, float)):
+                    run.log({f"eval/villain_{key}": value})
 
 # -----------------------------------------------------------------------------
 # Outcome Determination
@@ -540,13 +484,13 @@ def _extract_life(obs: dict, player_index: int) -> Optional[float]:
     return None
 
 # -----------------------------------------------------------------------------
-# Main Evaluator
+# Main Simulation
 # -----------------------------------------------------------------------------
 
-def evaluate_models(
+def simulate_models(
     hero_player: Player,
     villain_player: Player,
-    eval_hypers: Optional[EvaluationHypers] = None,
+    sim_hypers: Optional[SimulationHypers] = None,
 ) -> GameStats:
     """
     Evaluate models in parallel by running multiple games simultaneously.
@@ -559,15 +503,15 @@ def evaluate_models(
     Returns:
         GameStats with results
     """
-    logger = getLogger(__name__).getChild("evaluate_parallel")
+    logger = getLogger(__name__).getChild("simulate_parallel")
     
     # Set up hyperparameters
-    eval_hypers = eval_hypers or EvaluationHypers()
+    sim_hypers = sim_hypers or SimulationHypers()
     
     # Determine number of threads (capped by games and CPU cores)
-    num_threads = min(eval_hypers.num_threads, eval_hypers.num_games)
-    logger.info(f"Starting evaluation: {hero_player.name} vs {villain_player.name}")
-    logger.info(f"Running {eval_hypers.num_games} games with max {eval_hypers.max_steps} steps each")
+    num_threads = min(sim_hypers.num_threads, sim_hypers.num_games)
+    logger.info(f"Starting simulation: {hero_player.name} vs {villain_player.name}")
+    logger.info(f"Running {sim_hypers.num_games} games with max {sim_hypers.max_steps} steps each")
     logger.info(f"Using {num_threads} parallel threads")
     
     # Create shared stats object and counter
@@ -581,10 +525,10 @@ def evaluate_models(
     # Worker function that runs games until target count is reached
     def worker_thread(thread_id):
         # Create environment for this thread
-        match = Match(eval_hypers.match)
+        match = Match(sim_hypers.match)
         observation_space = ObservationSpace()
         reward = Reward(RewardHypers())
-        env = Env(match, observation_space, reward, auto_reset=False)
+        env = Env(match, observation_space, reward, auto_reset=False, enable_profiler=True, enable_behavior_tracking=True)
         
         nonlocal completed_games
         thread_games = 0
@@ -592,22 +536,29 @@ def evaluate_models(
         while True:
             # Check if we've completed enough games
             with completed_lock:
-                if completed_games >= eval_hypers.num_games:
+                if completed_games >= sim_hypers.num_games:
                     break
                 # Claim this game
                 game_id = completed_games
                 completed_games += 1
             
             # Simulate a single game
-            outcome, steps, duration = _simulate_game(
-                env, hero_player, villain_player, eval_hypers.max_steps)
+            outcome, steps, duration, profiler_data, behavior_data = _simulate_game(
+                env, hero_player, villain_player, sim_hypers.max_steps)
             
             # Record game with minimal metadata
             metadata = {
                 "thread_id": thread_id,
             }
             
-            stats.record_game(outcome, steps, duration, metadata)
+            stats.record_game(
+                outcome=outcome, 
+                steps=steps, 
+                duration=duration, 
+                metadata=metadata,
+                profiler_info=profiler_data,
+                behavior_info=behavior_data
+            )
             
             # Update thread counter
             thread_games += 1
@@ -617,6 +568,8 @@ def evaluate_models(
                 logger.info(f"Thread {thread_id}: Completed {thread_games} games")
         
         # Clean up
+        info = env.info()
+        logger.info(f"Thread {thread_id} info: {info}") 
         env.close()
         logger.info(f"Thread {thread_id} completed {thread_games} games")
     
@@ -636,10 +589,10 @@ def evaluate_models(
             current = completed_games
         
         # Progress update every 5 seconds
-        if current < eval_hypers.num_games:
+        if current < sim_hypers.num_games:
             elapsed = time.time() - start_time
             rate = current / elapsed if elapsed > 0 else 0
-            remaining = eval_hypers.num_games - current
+            remaining = sim_hypers.num_games - current
             eta = remaining / rate if rate > 0 else "unknown"
             
             if isinstance(eta, float):
@@ -647,8 +600,8 @@ def evaluate_models(
             else:
                 eta_str = str(eta)
                 
-            logger.info(f"Progress: {current}/{eval_hypers.num_games} games completed "
-                       f"({current / eval_hypers.num_games:.1%}) | "
+            logger.info(f"Progress: {current}/{sim_hypers.num_games} games completed "
+                       f"({current / sim_hypers.num_games:.1%}) | "
                        f"Rate: {rate:.2f} games/sec | ETA: {eta_str}")
         
         # Sleep to avoid busy waiting
@@ -663,7 +616,7 @@ def evaluate_models(
     
     # Log results
     summary = stats.get_summary()
-    logger.info(f"Evaluation complete: {summary['total_games']} games in {total_time:.2f} seconds")
+    logger.info(f"Simulation complete: {summary['total_games']} games in {total_time:.2f} seconds")
     logger.info(f"Overall performance: {summary['total_games'] / total_time:.2f} games/second")
     logger.info(f"Hero wins: {summary['hero_wins']} ({summary['hero_win_rate']:.2%})")
     logger.info(f"Villain wins: {summary['villain_wins']} ({summary['villain_win_rate']:.2%})")
@@ -676,6 +629,9 @@ def evaluate_models(
     logger.info(f"Mid game win rate: {detailed['mid_game_win_rate']:.2f}")
     logger.info(f"Late game win rate: {detailed['late_game_win_rate']:.2f}")
     
+    # Log profiler and behavior summary
+    stats.log_profiler_and_behavior_summary(logger)
+    
     return stats
 
 def _simulate_game(
@@ -683,7 +639,7 @@ def _simulate_game(
     hero_player: Player,
     villain_player: Player,
     max_steps: int
-) -> Tuple[GameOutcome, int, float]:
+) -> Tuple[GameOutcome, int, float, Dict[str, Any], Dict[str, Dict[str, Any]]]:
     """
     Simulate a single game between two players.
     
@@ -694,7 +650,7 @@ def _simulate_game(
         max_steps: Maximum steps before timeout
         
     Returns:
-        Tuple of (outcome, steps, duration)
+        Tuple of (outcome, steps, duration, profiler_data, behavior_data)
     """
     # Reset environment
     start_time = time.time()
@@ -704,6 +660,7 @@ def _simulate_game(
     
     # Track game state
     last_obs = obs
+    last_info = info
     
     # Main game loop
     while not done and turn_count < max_steps:
@@ -732,6 +689,7 @@ def _simulate_game(
             new_obs, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
             last_obs = new_obs
+            last_info = info
             turn_count += 1
             
             # Update observation for next step
@@ -747,9 +705,13 @@ def _simulate_game(
     duration = time.time() - start_time
     
     # Determine outcome
-    outcome = determine_outcome(info, last_obs, turn_count, max_steps)
+    outcome = determine_outcome(last_info, last_obs, turn_count, max_steps)
     
-    return outcome, turn_count, duration
+    # Extract profiler and behavior data from the environment info
+    profiler_data = last_info.get("profiler", {})
+    behavior_data = last_info.get("behavior", {})
+    
+    return outcome, turn_count, duration, profiler_data, behavior_data
 
 # -----------------------------------------------------------------------------
 # Command Line Interface
@@ -761,33 +723,35 @@ def main():
     
     parser = argparse.ArgumentParser(description="Evaluate manabot models")
     
-    # Automatically add arguments from EvaluationHypers
-    add_hypers(parser, EvaluationHypers)    
+    # Automatically add arguments from SimulationHypers
+    add_hypers(parser, SimulationHypers)    
     args = parser.parse_args()
-    eval_hypers = parse_hypers(args, EvaluationHypers)
-    assert isinstance(eval_hypers, EvaluationHypers)
+    sim_hypers = parse_hypers(args, SimulationHypers)
+    assert isinstance(sim_hypers, SimulationHypers)
     
-    logger.info(f"Loading hero model: {eval_hypers.hero}")
-    hero_agent = load_model_from_wandb(eval_hypers.hero, device="cpu")
+    logger.info(f"Loading hero model: {sim_hypers.hero}")
+    hero_agent = load_model_from_wandb(sim_hypers.hero, device="cpu")
     
-    if eval_hypers.villain.lower() == "random":
+    if sim_hypers.villain.lower() == "random":
         logger.info("Using random opponent")
         villain_player = RandomPlayer("RandomVillain")
+    elif sim_hypers.villain.lower() == "default":
+        logger.info("Using default opponent")
+        villain_player = DefaultPlayer("DefaultVillain")
     else:
-        logger.info(f"Loading villain model: {eval_hypers.villain}")
-        villain_agent = load_model_from_wandb(eval_hypers.villain, device="cpu")
-        villain_player = ModelPlayer(f"Model_{eval_hypers.villain}", villain_agent)
+        logger.info(f"Loading villain model: {sim_hypers.villain}") 
+        villain_agent = load_model_from_wandb(sim_hypers.villain, device="cpu")
+        villain_player = ModelPlayer(f"Model_{sim_hypers.villain}", villain_agent)
     
     hero_player = ModelPlayer(
-        f"Model_{eval_hypers.hero}", 
+        f"Model_{sim_hypers.hero}", 
         hero_agent, 
     )
     
-    # Run evaluation
-    evaluate_models(
+    simulate_models(
         hero_player=hero_player,
         villain_player=villain_player,
-        eval_hypers=eval_hypers,
+        sim_hypers=sim_hypers,
     )
     
 if __name__ == "__main__":
