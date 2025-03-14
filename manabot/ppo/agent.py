@@ -324,10 +324,18 @@ class GameObjectAttention(nn.Module):
 
         post_norm = self.norm2(x + mlp_out)  # [B, total_objs, embedding_dim]   
         log.debug(f"Post norm: {post_norm.shape}")
+
         # ZERO OUT outputs for masked (invalid) positions.
         mask = (~key_padding_mask).unsqueeze(-1).float()  # valid positions: 1.0; invalid: 0.0
         post_norm = post_norm * mask
-        log.debug(f"Post norm after masking: {post_norm.shape}")
+        
+        # Add assertion to verify masked outputs are exactly zero
+        if torch.any(key_padding_mask):
+            masked_outputs = post_norm[key_padding_mask]
+            if not torch.all(masked_outputs == 0):
+                self.logger.error(f"Attention mask failure: {torch.sum(masked_outputs != 0).item()} non-zero values in masked positions")
+                self.logger.error(f"Max value in masked region: {torch.max(torch.abs(masked_outputs)).item()}")
+
         return post_norm
 
 def layer_init(layer: nn.Module, gain: int = 1, bias_const: float = 0.0) -> nn.Module:

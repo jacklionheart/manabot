@@ -40,18 +40,9 @@ def load_model_from_wandb(
         
         # Use a silent API object without starting a run
         api = wandb.Api()
-        artifact_path = f"{project or 'manabot'}/{artifact_name + "_latest.pt"}:{version}"
+        artifact_path = f"{project or 'manabot'}/{artifact_name}:{version}"
         logger.info(f"Loading artifact: {artifact_path}")
-        
-        try:
-            artifact = api.artifact(artifact_path)
-        except Exception as e:
-            logger.warning(f"Error loading artifact {artifact_path}: {e}")
-            # Try with a more specific path format
-            artifact_path = f"{project or 'manabot'}/{artifact_name}_latest.pt:{version}"
-            logger.info(f"Trying alternative artifact path: {artifact_path}")
-            artifact = api.artifact(artifact_path)
-            
+        artifact = api.artifact(artifact_path)
         artifact_dir = artifact.download("/tmp")
         
         # Directly use the expected filename pattern based on the save method

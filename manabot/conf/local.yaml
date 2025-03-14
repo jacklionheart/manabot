@@ -20,7 +20,7 @@ experiment:
   profiler_enabled: True
 
 agent:
-  attention_on: False
+  attention_on: True
 
 hydra:
   run:

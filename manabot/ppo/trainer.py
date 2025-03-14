@@ -281,6 +281,14 @@ class Trainer:
 
                 self.logger.info("Starting rollout data collection.")
                 wandb.log({"rollout/step": 0}, step=self.global_step)
+
+                if update % 10 == 0 and self.agent.hypers.attention_on:
+                    self.logger.info("Verifying attention masking mechanism...")
+                    attention_valid = self.verify_attention_masking(next_obs)
+                    if self.wandb:
+                        self.wandb.log({"verification/attention_valid": int(attention_valid)}, 
+                                    step=self.global_step)
+
                 
                 with self.profiler.track("rollout"):
                     with self.profiler.track("step"):
@@ -383,6 +391,7 @@ class Trainer:
             raise e
 
         self.global_step += self.hypers.num_envs
+
         if not self._validate_obs(new_obs):
             raise RuntimeError("Invalid observation format detected; halting training.")
         
@@ -392,11 +401,11 @@ class Trainer:
         return new_obs, done, new_actor_ids
 
     def _optimize_step(self, obs: Dict[str, torch.Tensor],
-                       logprobs: torch.Tensor,
-                       actions: torch.Tensor,
-                       advantages: torch.Tensor,
-                       returns: torch.Tensor,
-                       values: torch.Tensor) -> Tuple[float, float]:
+                    logprobs: torch.Tensor,
+                    actions: torch.Tensor,
+                    advantages: torch.Tensor,
+                    returns: torch.Tensor,
+                    values: torch.Tensor) -> Tuple[float, float]:
         hypers = self.hypers
         _, new_logprobs, entropy, new_values = self.agent.get_action_and_value(obs, actions)
         logratio = new_logprobs - logprobs
@@ -420,7 +429,104 @@ class Trainer:
 
         self.optimizer.zero_grad()
         loss.backward()
+        
+        # NEW: Gradient norm monitoring
+        total_grad_norm = 0.0
+        layer_grad_norms = {}
+        
+        # Group parameters by layer type for more helpful analysis
+        embedding_grad_norm = 0.0
+        attention_grad_norm = 0.0
+        policy_head_grad_norm = 0.0
+        value_head_grad_norm = 0.0
+        other_grad_norm = 0.0
+        
+        # Log per-layer gradient norms
+        for name, param in self.agent.named_parameters():
+            if param.grad is not None:
+                grad_norm = param.grad.detach().data.norm(2).item()
+                layer_grad_norms[name] = grad_norm
+                total_grad_norm += grad_norm ** 2
+                
+                # Categorize gradients by component
+                if "player_embedding" in name or "card_embedding" in name or "perm_embedding" in name:
+                    embedding_grad_norm += grad_norm ** 2
+                elif "attention" in name:
+                    attention_grad_norm += grad_norm ** 2
+                elif "policy_head" in name:
+                    policy_head_grad_norm += grad_norm ** 2
+                elif "value_head" in name:
+                    value_head_grad_norm += grad_norm ** 2
+                else:
+                    other_grad_norm += grad_norm ** 2
+                    
+        total_grad_norm = total_grad_norm ** 0.5
+        embedding_grad_norm = embedding_grad_norm ** 0.5
+        attention_grad_norm = attention_grad_norm ** 0.5
+        policy_head_grad_norm = policy_head_grad_norm ** 0.5
+        value_head_grad_norm = value_head_grad_norm ** 0.5
+        other_grad_norm = other_grad_norm ** 0.5
+        
+        # Get largest and smallest non-zero gradient norm for outlier detection
+        non_zero_norms = [norm for norm in layer_grad_norms.values() if norm > 0]
+        if non_zero_norms:
+            max_layer_norm = max(non_zero_norms)
+            min_layer_norm = min(non_zero_norms)
+            max_to_min_ratio = max_layer_norm / min_layer_norm if min_layer_norm > 0 else float('inf')
+        else:
+            max_layer_norm = 0
+            min_layer_norm = 0
+            max_to_min_ratio = 0
+            
+        # Log all gradient information
+        self.logger.info(f"Total gradient norm: {total_grad_norm:.4f}")
+        
+        # Log if any concerning gradient patterns are detected
+        if total_grad_norm > 10.0:
+            self.logger.warning(f"Potentially exploding gradient: {total_grad_norm:.4f}")
+        elif total_grad_norm < 1e-4:
+            self.logger.warning(f"Potentially vanishing gradient: {total_grad_norm:.4f}")
+        
+        if max_to_min_ratio > 1000:
+            self.logger.warning(f"Extreme gradient imbalance: max/min ratio = {max_to_min_ratio:.2f}")
+            
+        # Log the top 5 highest gradient norms for detailed debugging
+        if layer_grad_norms:
+            top_grads = sorted(layer_grad_norms.items(), key=lambda x: x[1], reverse=True)[:5]
+            self.logger.debug("Top 5 highest gradient norms:")
+            for name, norm in top_grads:
+                self.logger.debug(f"  {name}: {norm:.6f}")
+        
+        # Log to wandb if available
+        if self.wandb:
+            gradient_metrics = {
+                "gradients/total_norm": total_grad_norm,
+                "gradients/embedding_norm": embedding_grad_norm,
+                "gradients/attention_norm": attention_grad_norm,
+                "gradients/policy_head_norm": policy_head_grad_norm,
+                "gradients/value_head_norm": value_head_grad_norm,
+                "gradients/other_norm": other_grad_norm,
+                "gradients/max_layer_norm": max_layer_norm,
+                "gradients/min_layer_norm": min_layer_norm,
+                "gradients/max_to_min_ratio": max_to_min_ratio,
+            }
+            self.wandb.log(gradient_metrics, step=self.global_step)
+        
         nn.utils.clip_grad_norm_(self.agent.parameters(), hypers.max_grad_norm)
+        
+        clipped_total_grad_norm = 0.0
+        for param in self.agent.parameters():
+            if param.grad is not None:
+                clipped_total_grad_norm += param.grad.detach().data.norm(2).item() ** 2
+        clipped_total_grad_norm = clipped_total_grad_norm ** 0.5
+        
+        if clipped_total_grad_norm < total_grad_norm and self.wandb:
+            self.wandb.log({
+                "gradients/pre_clip_norm": total_grad_norm,
+                "gradients/post_clip_norm": clipped_total_grad_norm,
+                "gradients/clip_ratio": clipped_total_grad_norm / total_grad_norm if total_grad_norm > 0 else 0,
+            }, step=self.global_step)
+        
         self.optimizer.step()
 
         with torch.no_grad():
@@ -449,6 +555,47 @@ class Trainer:
         self.logger.debug(f"Optimize step: approx_kl={approx_kl}, clip_fraction={clip_fraction}")
         return approx_kl, clip_fraction
 
+    def verify_attention_masking(self, obs):
+        """
+        Verifies attention masking is working correctly by:
+        1. Recording outputs with normal inputs
+        2. Creating a modified observation where invalid/masked tokens have random values
+        3. Ensuring outputs are identical, proving masked values don't leak through
+        """
+        self.logger.debug("Verifying attention masking integrity")
+        
+        # Get original object embeddings and mask
+        with torch.no_grad():
+            objects, is_agent, validity = self.agent._gather_object_embeddings(obs)
+            key_padding_mask = (validity == 0)
+            original_output = self.agent.attention(objects, is_agent, key_padding_mask)
+        
+        # Create a copy with random noise in the masked positions
+        noisy_objects = objects.clone()
+        if torch.any(key_padding_mask):
+            # Add large random noise to masked positions
+            noise = torch.randn_like(objects) * 10.0
+            noisy_objects[key_padding_mask] = noise[key_padding_mask]
+            
+            # Get output with noisy inputs
+            noisy_output = self.agent.attention(noisy_objects, is_agent, key_padding_mask)
+            
+            # Check if outputs are identical (they should be if masking works)
+            diff = (original_output - noisy_output).abs().max().item()
+            
+            if diff > 1e-5:
+                self.logger.error(f"Attention mask leakage detected! Max difference: {diff}")
+                # Log additional diagnostics about which positions leaked
+                leaked_positions = ((original_output - noisy_output).abs() > 1e-5).sum().item()
+                self.logger.error(f"Number of positions with leakage: {leaked_positions}")
+                return False
+            else:
+                self.logger.debug("Attention masking verified: No leakage detected")
+                return True
+        else:
+            self.logger.debug("No masked positions to verify")
+            return True
+
     def _validate_obs(self, obs: dict) -> bool:
         expected_keys = set(self.env.observation_space.keys())
         if set(obs.keys()) != expected_keys:
@@ -461,6 +608,35 @@ class Trainer:
                 self.logger.error(f"Observation shape mismatch for key {k}. "
                                   f"Expected {expected_shape} (inside batch), got {v.shape[1:]}")
                 return False
+        
+        # Now log detailed statistics
+        validity_stats = {
+            "agent_player_valid": obs["agent_player_valid"].sum().item(),
+            "opponent_player_valid": obs["opponent_player_valid"].sum().item(),
+            "agent_cards_valid": obs["agent_cards_valid"].sum().item(),
+            "opponent_cards_valid": obs["opponent_cards_valid"].sum().item(),
+            "agent_permanents_valid": obs["agent_permanents_valid"].sum().item(),
+            "opponent_permanents_valid": obs["opponent_permanents_valid"].sum().item(),
+            "actions_valid": obs["actions_valid"].sum().item(),
+        }
+        
+        # Log summary
+        self.logger.debug(f"Observation validity statistics:")
+        for key, count in validity_stats.items():
+            self.logger.debug(f"  {key}: {count}")
+        
+        # Check for anomalies
+        if validity_stats["agent_player_valid"] < 1 or validity_stats["opponent_player_valid"] < 1:
+            self.logger.warning(f"Missing valid players in observation!")
+        
+        if validity_stats["actions_valid"] < 1:
+            self.logger.warning(f"No valid actions in observation!")
+        
+        # Log to wandb
+        if self.wandb:
+            wandb_stats = {f"observation/{k}": v for k, v in validity_stats.items()}
+            self.wandb.log(wandb_stats, step=self.global_step)
+        
         return True
 
     def _log_system_metrics(self):
