@@ -15,9 +15,12 @@ train:
   learning_rate: 2.5e-4
 
 experiment:
-  exp_name: "quick_train"
+  exp_name: "local"
   device: "cpu"
   profiler_enabled: True
+
+agent:
+  attention_on: False
 
 hydra:
   run:
