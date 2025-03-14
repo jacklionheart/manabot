@@ -154,7 +154,6 @@ def test_attention_mechanism(agent: Agent, real_observation: Dict[str, torch.Ten
     """
     Verify the attention mechanism's behavior and output properties.
     """
-    pytest.skip("Attention mechanism is disabled")
     obs = real_observation
     objects, is_agent, validity = agent._gather_object_embeddings(obs)
     key_padding_mask = (validity == 0)
@@ -173,7 +172,6 @@ def test_focus_object_incorporation(agent: Agent, real_observation: Dict[str, to
     """
     Verify that focus objects are correctly incorporated into action representations.
     """
-    pytest.skip("Focus object incorporation is disabled")
     obs = real_observation
     objects, is_agent, validity = agent._gather_object_embeddings(obs)
     key_padding_mask = (validity == 0)
@@ -253,7 +251,6 @@ def test_attention_stability(agent: Agent, real_observation: Dict[str, torch.Ten
     """
     Verify that the attention mechanism produces stable outputs across multiple forward passes.
     """
-    pytest.skip("Attention mechanism is disabled")
     obs = real_observation
     objects, is_agent, validity = agent._gather_object_embeddings(obs)
     key_padding_mask = (validity == 0)

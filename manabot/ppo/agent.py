@@ -45,9 +45,12 @@ class Agent(nn.Module):
         
         # Currently not using attention
         # Global game state processor.
-        # num_heads = hypers.num_attention_heads
-        # self.attention = GameObjectAttention(embed_dim, num_heads=num_heads)
-        # logger.info(f"Attention: {embed_dim} -> {embed_dim}")
+        if self.hypers.attention_on:
+            num_heads = self.hypers.num_attention_heads
+            self.attention = GameObjectAttention(embed_dim, num_heads=num_heads)
+            self.logger.info(f"Attention: {embed_dim} -> {embed_dim}")
+        else:
+            self.logger.info("Attention is off")
         
         # Action processing.
         actions_with_focus_dim = (self.max_focus_objects + 1) * embed_dim
@@ -80,8 +83,11 @@ class Agent(nn.Module):
 
         key_padding_mask = (validity == 0)  # [B, total_objs]
         log.debug(f"Key padding mask: {key_padding_mask.shape}")
-        # post_attention_objects = self.attention(objects, is_agent, key_padding_mask=key_padding_mask)
-        post_attention_objects = objects
+        
+        if self.hypers.attention_on:
+            post_attention_objects = self.attention(objects, is_agent, key_padding_mask=key_padding_mask)
+        else:
+            post_attention_objects = objects
         log.debug(f"Post attention objects: {post_attention_objects.shape}")
 
         informed_actions = self._gather_informed_actions(obs, post_attention_objects)

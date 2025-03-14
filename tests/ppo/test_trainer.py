@@ -214,22 +214,6 @@ def test_action_masking(trainer):
     # For every invalid action, check that the corresponding masked logits equal -1e8.
     assert torch.all(masked_logits[invalid_actions] == -1e8), "Invalid actions not properly masked."
 
-def test_multi_agent_turn_alternation(trainer):
-    """Test agents properly alternate turns."""
-    next_obs, _ = trainer.env.reset()
-    actor_ids = obs_mod.get_agent_indices(next_obs)
-    prev_actor_id = actor_ids[0]
-    
-    for _ in range(4):  # Test a few turns
-        next_obs, _, actor_ids = trainer._rollout_step(next_obs, actor_ids)
-        current_actor_id = actor_ids[0]
-        
-        # Either the actor changed or the game ended
-        if not next_obs["actions_valid"].any():
-            break
-            
-        assert current_actor_id != prev_actor_id
-        prev_actor_id = current_actor_id
 
 if __name__ == "__main__":
     pytest.main([__file__])

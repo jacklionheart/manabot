@@ -56,7 +56,8 @@ class AgentHypers:
     hidden_dim: int = 64
     # Number of attention heads used in the GameObjectAttention layer.
     num_attention_heads: int = 4
-
+    attention_on: bool = True
+    
 @dataclass
 class TrainHypers:
     """Training-related hyperparameters."""
