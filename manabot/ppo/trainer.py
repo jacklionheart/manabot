@@ -267,6 +267,7 @@ class Trainer:
 
             prev_actor_ids = manabot.env.observation.get_agent_indices(next_obs)
 
+            self.save()
             for update in range(1, num_updates + 1):
                 if hypers.anneal_lr:
                     frac = 1.0 - (update - 1) / num_updates
