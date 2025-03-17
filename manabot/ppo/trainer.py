@@ -370,7 +370,7 @@ class Trainer:
                     f"Update {update}/{num_updates} | SPS: {sps} | Total time: {time_since_start:.2f}s"
                 )
 
-                if update % 100 == 0 and self.wandb:
+                if update % 100 == 0:
                     self.logger.info(f"Saving artifa    ct @ update: {update} step: {self.global_step}")
                     self.save()
 
@@ -663,7 +663,9 @@ class Trainer:
         self.logger.debug(f"Logged system metrics: {metrics}")
 
     def save(self) -> None:
-        assert self.wandb is not None
+        if self.wandb is None:
+            return
+        
         name = self.experiment.exp_name
         
         timestamp = datetime.datetime.fromtimestamp(self.start_time).strftime("%Y%m%d_%H%M%S")
