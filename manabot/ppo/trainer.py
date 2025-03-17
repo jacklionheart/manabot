@@ -16,6 +16,7 @@ from dataclasses import asdict
 from omegaconf import DictConfig, OmegaConf
 from typing import Dict, Tuple, List
 import time
+import datetime
 import wandb
 
 import numpy as np
@@ -660,12 +661,13 @@ class Trainer:
         wandb.log(metrics, step=self.global_step)
         self.logger.debug(f"Logged system metrics: {metrics}")
 
-
     def save(self) -> None:
         assert self.wandb is not None
         name = self.experiment.exp_name
-        path = f"{name}.pt"  
         
+        timestamp = datetime.datetime.fromtimestamp(self.start_time).strftime("%Y%m%d_%H%M%S")
+        version_tag = f"{timestamp}_{self.global_step}"
+                
         # Save all relevant hyperparameters
         hypers_dict = {
             'agent_hypers': asdict(self.agent.hypers),
@@ -673,6 +675,7 @@ class Trainer:
             'train_hypers': asdict(self.hypers),
         }
         
+        path = f"{name}.pt"
         torch.save({
             'model_state_dict': self.agent.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
@@ -680,14 +683,31 @@ class Trainer:
             'hypers': hypers_dict,
         }, path)
         
-        # Create and log artifact
+        # Create and log artifact with the version tag
         artifact = wandb.Artifact(
             name=name,
             type="model",
-            description=f"Latest model at step {self.global_step}",
+            description=f"Model checkpoint at step {self.global_step}",
         )
+        
+        # Add metadata for easier filtering/selection
+        artifact.metadata = {
+            "version": version_tag,
+            "timestamp": timestamp,
+            "step": self.global_step,
+            "model_type": self.agent.__class__.__name__,
+        }
+        
+        # You can add additional tags to make it easier to filter
+        if self.agent.hypers.attention_on:
+            artifact.metadata["architecture"] = "attention"
+        
         artifact.add_file(path)
-        self.wandb.log_artifact(artifact)
+        
+        # Log the artifact with an alias that includes the version
+        self.wandb.log_artifact(artifact, aliases=[f"step_{self.global_step}", version_tag])
+        
+        self.logger.info(f"Saved model with version tag: {version_tag}")
 
 
 @hydra.main(version_base=None, config_path="../conf", config_name="local")

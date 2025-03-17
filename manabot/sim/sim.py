@@ -713,6 +713,19 @@ def _simulate_game(
     
     return outcome, turn_count, duration, profiler_data, behavior_data
 
+def load_player(model_str: str) -> Player:
+    if model_str.lower() == "random":
+        return RandomPlayer("RandomPlayer")
+    elif model_str.lower() == "default":
+        return DefaultPlayer("DefaultPlayer")
+    else:
+        if ":" in model_str:
+            model, version = model_str.split(":")
+        else:
+            model = model_str
+            version = "latest"
+        return ModelPlayer(f"Model_{model_str}", load_model_from_wandb(model, version, device="cpu"))
+
 # -----------------------------------------------------------------------------
 # Command Line Interface
 # -----------------------------------------------------------------------------
@@ -730,23 +743,9 @@ def main():
     assert isinstance(sim_hypers, SimulationHypers)
     
     logger.info(f"Loading hero model: {sim_hypers.hero}")
-    hero_agent = load_model_from_wandb(sim_hypers.hero, device="cpu")
-    
-    if sim_hypers.villain.lower() == "random":
-        logger.info("Using random opponent")
-        villain_player = RandomPlayer("RandomVillain")
-    elif sim_hypers.villain.lower() == "default":
-        logger.info("Using default opponent")
-        villain_player = DefaultPlayer("DefaultVillain")
-    else:
-        logger.info(f"Loading villain model: {sim_hypers.villain}") 
-        villain_agent = load_model_from_wandb(sim_hypers.villain, device="cpu")
-        villain_player = ModelPlayer(f"Model_{sim_hypers.villain}", villain_agent)
-    
-    hero_player = ModelPlayer(
-        f"Model_{sim_hypers.hero}", 
-        hero_agent, 
-    )
+    logger.info(f"Loading villain model: {sim_hypers.villain}")
+    hero_player = load_player(sim_hypers.hero)
+    villain_player = load_player(sim_hypers.villain)
     
     simulate_models(
         hero_player=hero_player,
