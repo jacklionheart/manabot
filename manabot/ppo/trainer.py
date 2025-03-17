@@ -12,7 +12,7 @@ PPO training steps:
 This version uses a multi-agent buffer organized as (num_envs x num_players) queues.
 """
 
-from collections import defaultdict
+from dataclasses import asdict
 from omegaconf import DictConfig, OmegaConf
 from typing import Dict, Tuple, List
 import time
@@ -369,7 +369,7 @@ class Trainer:
                 )
 
                 if update % 100 == 0 and self.wandb:
-                    self.logger.info(f"Saving artifact @ update: {update} step: {self.global_step}")
+                    self.logger.info(f"Saving artifa    ct @ update: {update} step: {self.global_step}")
                     self.save()
 
                 self.logger.info(f"Buffer sizes: {[len(buf.actions_buf) for buf in self.multi_buffer.buffers.values()]}")
@@ -665,10 +665,19 @@ class Trainer:
         assert self.wandb is not None
         name = self.experiment.exp_name
         path = f"{name}.pt"  
+        
+        # Save all relevant hyperparameters
+        hypers_dict = {
+            'agent_hypers': asdict(self.agent.hypers),
+            'observation_hypers': asdict(self.env.observation_space.encoder.hypers),
+            'train_hypers': asdict(self.hypers),
+        }
+        
         torch.save({
             'model_state_dict': self.agent.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'global_step': self.global_step,
+            'hypers': hypers_dict,
         }, path)
         
         # Create and log artifact
